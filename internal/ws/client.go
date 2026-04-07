@@ -20,14 +20,18 @@ type WSClient struct {
 	conn           *websocket.Conn
 	rawChan        chan []byte
 	db             storage.Storage
-	lastSnapshotTs int64 // timestamp du snapshot initial
+	lastSnapshotTs int64 // initial snapshot timestamp
+
+	preSnapshotChan chan []byte   // buffer WS messages before snapshot is loaded
+	snapshotDone    chan struct{} // indicates REST snapshot is loaded
 }
 
 func NewClient(url string, db storage.Storage) *WSClient {
 	return &WSClient{
-		url:     url,
-		rawChan: make(chan []byte, 1000),
-		db:      db,
+		url:             url,
+		rawChan:         make(chan []byte, 1000),
+		db:              db,
+		preSnapshotChan: make(chan []byte, 1000),
 	}
 }
 
@@ -40,12 +44,6 @@ func (c *WSClient) Connect() {
 	obChan := make(chan market.OrderBookUpdate, 100)
 	go c.db.Run(tradeChan, obChan)
 
-	// Initial GET request to get snapshot
-	if err := c.FetchInitialOrderBook(obChan); err != nil {
-		logger.Error("Failed to fetch initial order book: %v", err)
-		return
-	}
-
 	// WS connection
 	var err error
 	c.conn, _, err = websocket.DefaultDialer.Dial(c.url, nil)
@@ -56,10 +54,42 @@ func (c *WSClient) Connect() {
 
 	logger.Info("WebSocket connected to %s", c.url)
 
-	// Start WS read loop
+	// Start WS read loop and buffer messages
 	go c.readLoop()
+
+	// Initial GET request to get snapshot
+	if err := c.FetchInitialOrderBook(obChan); err != nil {
+		logger.Error("Failed to fetch initial order book: %v", err)
+		return
+	}
+
+	close(c.snapshotDone)
+
+	// Drain buffered messages into rawChan
+	c.processBuffer()
+
 	// Start processing loop
 	go c.processLoop(tradeChan, obChan)
+}
+
+// processBuffer drains preSnapshotChan into rawChan after snapshot
+func (c *WSClient) processBuffer() {
+	logger.Info("Waiting for snapshot to drain buffer...")
+
+	<-c.snapshotDone
+
+	logger.Info("Draining pre-snapshot buffer...")
+
+	for {
+		select {
+		case msg := <-c.preSnapshotChan:
+			c.rawChan <- msg
+		default:
+			// buffer is empty → we're done
+			logger.Info("Buffer fully drained")
+			return
+		}
+	}
 }
 
 func (c *WSClient) FetchInitialOrderBook(obChan chan<- market.OrderBookUpdate) error {
@@ -116,7 +146,12 @@ func (c *WSClient) readLoop() {
 				firstMessage = false
 			}
 			fmt.Println("Message:", string(message))
-			c.rawChan <- message
+			select {
+			case <-c.snapshotDone:
+				c.rawChan <- message
+			default:
+				c.preSnapshotChan <- message
+			}
 		}
 	}
 }
@@ -124,25 +159,27 @@ func (c *WSClient) readLoop() {
 // processLoop consumes rawChan → routes to storage channels
 func (c *WSClient) processLoop(tradeChan chan<- market.Trade, obChan chan<- market.OrderBookUpdate) {
 	for msg := range c.rawChan {
-		// Trade
-		var trade market.Trade
-		if err := json.Unmarshal(msg, &trade); err == nil && trade.Pair != "" {
-			tradeChan <- trade
-			logger.Info("Trade routed: %s %f @ %f", trade.Pair, trade.Size, trade.Price)
-			continue
-		}
-
-		// OrderBookUpdate
-		var ob market.OrderBookUpdate
-		if err := json.Unmarshal(msg, &ob); err == nil && ob.Pair != "" {
-			if ob.Timestamp <= c.lastSnapshotTs {
-				continue // ignorer deltas obsolètes
-			}
-			obChan <- ob
-			logger.Info("OrderBook routed: %s Bids:%d Asks:%d", ob.Pair, len(ob.Bids), len(ob.Asks))
-			continue
-		}
-
-		logger.Info("Unknown message: %s", string(msg))
+		c.processMessage(msg, tradeChan, obChan)
 	}
+}
+
+func (c *WSClient) processMessage(msg []byte, tradeChan chan<- market.Trade, obChan chan<- market.OrderBookUpdate) {
+	var trade market.Trade
+	if err := json.Unmarshal(msg, &trade); err == nil && trade.Pair != "" {
+		tradeChan <- trade
+		logger.Info("Trade routed: %s %f @ %f", trade.Pair, trade.Size, trade.Price)
+		return
+	}
+
+	var ob market.OrderBookUpdate
+	if err := json.Unmarshal(msg, &ob); err == nil && ob.Pair != "" {
+		if ob.Timestamp <= c.lastSnapshotTs {
+			return
+		}
+		obChan <- ob
+		logger.Info("OrderBook routed: %s Bids:%d Asks:%d", ob.Pair, len(ob.Bids), len(ob.Asks))
+		return
+	}
+
+	logger.Info("Unknown message: %s", string(msg))
 }
