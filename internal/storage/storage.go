@@ -1,20 +1,17 @@
 package storage
 
 import (
-	"sync"
-
+	"github.com/acapeyron/bermuda-core/internal/logger"
 	"github.com/acapeyron/bermuda-core/internal/market"
 )
 
-// Interface abstraite
+// Storage interface
 type Storage interface {
-	SaveOrderBook(ob market.OrderBookUpdate)
-	SaveTrade(trade market.Trade)
+	Run(trades <-chan market.Trade, obs <-chan market.OrderBookUpdate)
 }
 
 // Implémentation minimaliste (in-memory)
 type InMemoryStorage struct {
-	mu     sync.Mutex
 	Orders []market.OrderBookUpdate
 	Trades []market.Trade
 }
@@ -26,14 +23,16 @@ func NewInMemoryStorage() *InMemoryStorage {
 	}
 }
 
-func (s *InMemoryStorage) SaveOrderBook(ob market.OrderBookUpdate) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.Orders = append(s.Orders, ob)
-}
-
-func (s *InMemoryStorage) SaveTrade(trade market.Trade) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.Trades = append(s.Trades, trade)
+// Run consumes channels
+func (s *InMemoryStorage) Run(trades <-chan market.Trade, obs <-chan market.OrderBookUpdate) {
+	for {
+		select {
+		case t := <-trades:
+			s.Trades = append(s.Trades, t)
+			logger.Info("Trade saved: %s %f @ %f", t.Pair, t.Size, t.Price)
+		case ob := <-obs:
+			s.Orders = append(s.Orders, ob)
+			logger.Info("OrderBook saved: %s Bids:%d Asks:%d", ob.Pair, len(ob.Bids), len(ob.Asks))
+		}
+	}
 }
