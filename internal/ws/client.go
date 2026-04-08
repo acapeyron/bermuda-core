@@ -58,7 +58,7 @@ func (c *WSClient) Connect(ctx context.Context) {
 	logger.Info("WebSocket connected to %s", c.url)
 
 	// Start WS read loop and buffer messages
-	go c.readLoop()
+	go c.readLoop(ctx)
 
 	// Initial GET request to get snapshot
 	if err := c.FetchInitialOrderBook(obChan); err != nil {
