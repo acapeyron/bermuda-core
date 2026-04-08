@@ -98,27 +98,36 @@ func (c *WSClient) processBuffer() {
 func (c *WSClient) FetchInitialOrderBook(obChan chan<- market.OrderBookUpdate) error {
 	// Exemple simplifié : GET vers l'API REST pour récupérer l'état complet
 	// Remplace l'URL par l'endpoint réel de l'orderbook
-	resp, err := http.Get("https://data-api.binance.vision/api/v3/depth?symbol=BTCUSDT&limit=1000")
+	endpoint := "https://data-api.binance.vision/api/v3/depth?symbol=BTCUSDT&limit=1000"
+	resp, err := http.Get(endpoint)
 	if err != nil {
-		return err
+		return fmt.Errorf("Failed to fetch snapshot: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("Bad status: %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read body: %w", err)
+	}
+	fmt.Println("RAW RESPONSE:\n", string(body))
 
 	// Read the entire body
-	bodyBytes, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return err
-	}
-	fmt.Println("Response Body:\n", string(bodyBytes))
-
 	var snapshot market.OrderBookUpdate
-	if err := json.NewDecoder(resp.Body).Decode(&snapshot); err != nil {
-		return err
+	if err := json.Unmarshal(body, &snapshot); err != nil {
+		return fmt.Errorf("Failed to decode snapshot: %w", err)
 	}
 
 	// Save snapshot in DB
 	c.lastSnapshotTs = snapshot.Timestamp
-	obChan <- snapshot
+	select {
+	case obChan <- snapshot:
+	default:
+		logger.Warn("Snapshot dropped (channel full)")
+	}
+
 	logger.Info("Initial order book snapshot loaded: %s Bids:%d Asks:%d",
 		snapshot.Pair, len(snapshot.Bids), len(snapshot.Asks))
 
