@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -32,17 +33,19 @@ func NewClient(url string, db storage.Storage) *WSClient {
 		rawChan:         make(chan []byte, 1000),
 		db:              db,
 		preSnapshotChan: make(chan []byte, 1000),
+		snapshotDone:    make(chan struct{}),
 	}
 }
 
-func (c *WSClient) Connect() {
+func (c *WSClient) Connect(ctx context.Context) {
 	u, _ := url.Parse(c.url)
 	logger.Info("Connecting to %s", u.String())
 
 	// Channels for storage
 	tradeChan := make(chan market.Trade, 100)
 	obChan := make(chan market.OrderBookUpdate, 100)
-	go c.db.Run(tradeChan, obChan)
+
+	go c.db.Run(ctx, tradeChan, obChan)
 
 	// WS connection
 	var err error
@@ -69,7 +72,7 @@ func (c *WSClient) Connect() {
 	c.processBuffer()
 
 	// Start processing loop
-	go c.processLoop(tradeChan, obChan)
+	go c.processLoop(ctx, tradeChan, obChan)
 }
 
 // processBuffer drains preSnapshotChan into rawChan after snapshot
@@ -123,12 +126,14 @@ func (c *WSClient) FetchInitialOrderBook(obChan chan<- market.OrderBookUpdate) e
 }
 
 // readLoop reads WS → pushes raw messages
-func (c *WSClient) readLoop() {
+func (c *WSClient) readLoop(ctx context.Context) {
 	firstMessage := true
 	timeout := time.After(5 * time.Second)
 
 	for {
 		select {
+		case <-ctx.Done():
+			return
 		case <-timeout:
 			if firstMessage {
 				logger.Warn("No WS message received in 5 seconds")
@@ -157,9 +162,14 @@ func (c *WSClient) readLoop() {
 }
 
 // processLoop consumes rawChan → routes to storage channels
-func (c *WSClient) processLoop(tradeChan chan<- market.Trade, obChan chan<- market.OrderBookUpdate) {
-	for msg := range c.rawChan {
-		c.processMessage(msg, tradeChan, obChan)
+func (c *WSClient) processLoop(ctx context.Context, tradeChan chan<- market.Trade, obChan chan<- market.OrderBookUpdate) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case msg := <-c.rawChan:
+			c.processMessage(msg, tradeChan, obChan)
+		}
 	}
 }
 
