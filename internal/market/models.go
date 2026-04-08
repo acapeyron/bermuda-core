@@ -6,10 +6,11 @@ type Level struct {
 }
 
 type OrderBookUpdate struct {
-	Pair      string  `json:"pair"`
-	Bids      []Level `json:"bids"`
-	Asks      []Level `json:"asks"`
-	Timestamp int64   `json:"timestamp"`
+	Pair         string  `json:"pair"`
+	Bids         []Level `json:"bids"`
+	Asks         []Level `json:"asks"`
+	Timestamp    int64   `json:"timestamp"`
+	LastUpdateID int64   `json:"last_update_id"`
 }
 
 type Trade struct {

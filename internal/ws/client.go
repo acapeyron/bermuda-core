@@ -2,7 +2,6 @@ package ws
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,21 +16,23 @@ import (
 )
 
 type WSClient struct {
-	url            string
-	conn           *websocket.Conn
-	rawChan        chan []byte
-	db             storage.Storage
-	lastSnapshotTs int64 // initial snapshot timestamp
+	url          string
+	conn         *websocket.Conn
+	rawChan      chan []byte
+	db           storage.Storage
+	parser       market.Parser
+	lastUpdateID int64 // initial snapshot lastupdateId
 
 	preSnapshotChan chan []byte   // buffer WS messages before snapshot is loaded
 	snapshotDone    chan struct{} // indicates REST snapshot is loaded
 }
 
-func NewClient(url string, db storage.Storage) *WSClient {
+func NewClient(url string, db storage.Storage, parser market.Parser) *WSClient {
 	return &WSClient{
 		url:             url,
 		rawChan:         make(chan []byte, 1000),
 		db:              db,
+		parser:          parser,
 		preSnapshotChan: make(chan []byte, 1000),
 		snapshotDone:    make(chan struct{}),
 	}
@@ -86,6 +87,11 @@ func (c *WSClient) processBuffer() {
 	for {
 		select {
 		case msg := <-c.preSnapshotChan:
+			if ob, err := c.parser.ParseOrderBook(msg); err == nil && ob != nil {
+				if ob.LastUpdateID <= c.lastUpdateID {
+					continue
+				}
+			}
 			c.rawChan <- msg
 		default:
 			// buffer is empty → we're done
@@ -110,20 +116,20 @@ func (c *WSClient) FetchInitialOrderBook(obChan chan<- market.OrderBookUpdate) e
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("failed to read body: %w", err)
+		return fmt.Errorf("Failed to read body: %w", err)
 	}
 	fmt.Println("RAW RESPONSE:\n", string(body))
 
 	// Read the entire body
-	var snapshot market.OrderBookUpdate
-	if err := json.Unmarshal(body, &snapshot); err != nil {
+	snapshot, err := c.parser.ParseOrderBook(body)
+	if err != nil {
 		return fmt.Errorf("Failed to decode snapshot: %w", err)
 	}
 
 	// Save snapshot in DB
-	c.lastSnapshotTs = snapshot.Timestamp
+	c.lastUpdateID = snapshot.LastUpdateID
 	select {
-	case obChan <- snapshot:
+	case obChan <- *snapshot:
 	default:
 		logger.Warn("Snapshot dropped (channel full)")
 	}
@@ -183,19 +189,17 @@ func (c *WSClient) processLoop(ctx context.Context, tradeChan chan<- market.Trad
 }
 
 func (c *WSClient) processMessage(msg []byte, tradeChan chan<- market.Trade, obChan chan<- market.OrderBookUpdate) {
-	var trade market.Trade
-	if err := json.Unmarshal(msg, &trade); err == nil && trade.Pair != "" {
-		tradeChan <- trade
+	if trade, err := c.parser.ParseTrade(msg); err == nil && trade != nil {
+		tradeChan <- *trade
 		logger.Info("Trade routed: %s %f @ %f", trade.Pair, trade.Size, trade.Price)
 		return
 	}
 
-	var ob market.OrderBookUpdate
-	if err := json.Unmarshal(msg, &ob); err == nil && ob.Pair != "" {
-		if ob.Timestamp <= c.lastSnapshotTs {
+	if ob, err := c.parser.ParseOrderBook(msg); err == nil && ob != nil {
+		if ob.LastUpdateID <= c.lastUpdateID {
 			return
 		}
-		obChan <- ob
+		obChan <- *ob
 		logger.Info("OrderBook routed: %s Bids:%d Asks:%d", ob.Pair, len(ob.Bids), len(ob.Asks))
 		return
 	}

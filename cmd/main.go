@@ -6,6 +6,7 @@ import (
 	"github.com/common-nighthawk/go-figure"
 
 	"github.com/acapeyron/bermuda-core/internal/logger"
+	"github.com/acapeyron/bermuda-core/internal/market/binance"
 	"github.com/acapeyron/bermuda-core/internal/storage"
 	"github.com/acapeyron/bermuda-core/internal/ws"
 )
@@ -18,13 +19,14 @@ func main() {
 	logger.Init()
 
 	// Initialize storage (DB abstraite)
-	db := storage.NewInMemoryStorage()
+	storage := storage.NewInMemoryStorage()
 	logger.Info("Connected to DB")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	client := ws.NewClient("wss://fstream.binance.com/ws/btcusdt@depth", db)
+	parser := &binance.BinanceParser{}
+	client := ws.NewClient("wss://fstream.binance.com/ws/btcusdt@depth", storage, parser)
 	client.Connect(ctx)
 
 	// Run indefinitely
