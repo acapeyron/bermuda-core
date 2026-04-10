@@ -66,7 +66,7 @@ func (c *WSClient) Connect(ctx context.Context) {
 	// Initial GET request to get snapshot
 	if err := c.fetchInitialOrderBook(obChan); err != nil {
 		logger.Error("Failed to fetch initial order book: %v", err)
-		return
+		panic(err)
 	}
 
 	close(c.snapshotDone)
@@ -102,35 +102,60 @@ func (c *WSClient) fetchInitialOrderBook(obChan chan<- market.OrderBookUpdate) e
 		"https://fapi.binance.com/fapi/v1/depth?symbol=%s&limit=1000",
 		c.pair,
 	)
-	resp, err := http.Get(endpoint)
-	if err != nil {
-		return fmt.Errorf("failed to fetch snapshot: %w", err)
+
+	var resp *http.Response
+	var err error
+
+	// Retry logic
+	for i := 0; i < 3; i++ {
+		// New timeout PER attempt
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+
+		req, _ := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
+		resp, err = http.DefaultClient.Do(req)
+
+		cancel() // always release resources
+
+		if err == nil && resp != nil && resp.StatusCode == http.StatusOK {
+			break
+		}
+
+		logger.Warn("Snapshot attempt %d failed: %v", i+1, err)
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	// Hard fail after retries
+	if err != nil || resp == nil {
+		return fmt.Errorf("failed to fetch snapshot after retries: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("Bad status: %d", resp.StatusCode)
+		return fmt.Errorf("bad status after retries: %d", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("Failed to read body: %w", err)
+		return fmt.Errorf("failed to read body: %w", err)
 	}
-	// Read the entire body
+
 	snapshot, err := c.parser.ParseOrderBookSnapshot(body, c.pair)
 	if err != nil {
-		return fmt.Errorf("Failed to decode snapshot: %w", err)
+		return fmt.Errorf("failed to decode snapshot: %w", err)
 	}
 
 	c.lastUpdateID = snapshot.LastUpdateID
+
 	select {
 	case obChan <- *snapshot:
 	default:
 		logger.Warn("Snapshot dropped (channel full)")
 	}
 
-	logger.Info("Initial order book snapshot loaded: %s Bids:%d Asks:%d lastUpdateID:%d",
-		snapshot.Pair, len(snapshot.Bids), len(snapshot.Asks), snapshot.LastUpdateID)
+	logger.Info(
+		"Initial order book snapshot loaded: %s Bids:%d Asks:%d lastUpdateID:%d",
+		snapshot.Pair, len(snapshot.Bids), len(snapshot.Asks), snapshot.LastUpdateID,
+	)
 
 	return nil
 }
