@@ -12,6 +12,7 @@ import (
 
 	"github.com/acapeyron/bermuda-core/internal/logger"
 	"github.com/acapeyron/bermuda-core/internal/market"
+	"github.com/acapeyron/bermuda-core/internal/market/binance"
 	"github.com/acapeyron/bermuda-core/internal/storage"
 )
 
@@ -20,19 +21,21 @@ type WSClient struct {
 	conn         *websocket.Conn
 	rawChan      chan []byte
 	db           storage.Storage
-	parser       market.Parser
+	parser       *binance.BinanceParser
 	lastUpdateID int64 // initial snapshot lastupdateId
+	pair         string
 
 	preSnapshotChan chan []byte   // buffer WS messages before snapshot is loaded
 	snapshotDone    chan struct{} // indicates REST snapshot is loaded
 }
 
-func NewClient(url string, db storage.Storage, parser market.Parser) *WSClient {
+func NewClient(url string, db storage.Storage, parser *binance.BinanceParser, pair string) *WSClient {
 	return &WSClient{
 		url:             url,
 		rawChan:         make(chan []byte, 1000),
 		db:              db,
 		parser:          parser,
+		pair:            pair,
 		preSnapshotChan: make(chan []byte, 1000),
 		snapshotDone:    make(chan struct{}),
 	}
@@ -55,35 +58,29 @@ func (c *WSClient) Connect(ctx context.Context) {
 		logger.Error("WebSocket connect error: %v", err)
 		return
 	}
-
 	logger.Info("WebSocket connected to %s", c.url)
 
 	// Start WS read loop and buffer messages
 	go c.readLoop(ctx)
 
 	// Initial GET request to get snapshot
-	if err := c.FetchInitialOrderBook(obChan); err != nil {
+	if err := c.fetchInitialOrderBook(obChan); err != nil {
 		logger.Error("Failed to fetch initial order book: %v", err)
 		return
 	}
 
 	close(c.snapshotDone)
-
 	// Drain buffered messages into rawChan
-	c.processBuffer()
+	c.drainBuffer()
 
 	// Start processing loop
 	go c.processLoop(ctx, tradeChan, obChan)
 }
 
-// processBuffer drains preSnapshotChan into rawChan after snapshot
-func (c *WSClient) processBuffer() {
-	logger.Info("Waiting for snapshot to drain buffer...")
+// drainBuffer drains preSnapshotChan into rawChan after snapshot
 
-	<-c.snapshotDone
-
+func (c *WSClient) drainBuffer() {
 	logger.Info("Draining pre-snapshot buffer...")
-
 	for {
 		select {
 		case msg := <-c.preSnapshotChan:
@@ -94,22 +91,23 @@ func (c *WSClient) processBuffer() {
 			}
 			c.rawChan <- msg
 		default:
-			// buffer is empty → we're done
 			logger.Info("Buffer fully drained")
 			return
 		}
 	}
 }
 
-func (c *WSClient) FetchInitialOrderBook(obChan chan<- market.OrderBookUpdate) error {
-	// Exemple simplifié : GET vers l'API REST pour récupérer l'état complet
-	// Remplace l'URL par l'endpoint réel de l'orderbook
-	endpoint := "https://data-api.binance.vision/api/v3/depth?symbol=BTCUSDT&limit=1000"
+func (c *WSClient) fetchInitialOrderBook(obChan chan<- market.OrderBookUpdate) error {
+	endpoint := fmt.Sprintf(
+		"https://fapi.binance.com/fapi/v1/depth?symbol=%s&limit=1000",
+		c.pair,
+	)
 	resp, err := http.Get(endpoint)
 	if err != nil {
-		return fmt.Errorf("Failed to fetch snapshot: %w", err)
+		return fmt.Errorf("failed to fetch snapshot: %w", err)
 	}
 	defer resp.Body.Close()
+
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("Bad status: %d", resp.StatusCode)
 	}
@@ -118,15 +116,12 @@ func (c *WSClient) FetchInitialOrderBook(obChan chan<- market.OrderBookUpdate) e
 	if err != nil {
 		return fmt.Errorf("Failed to read body: %w", err)
 	}
-	fmt.Println("RAW RESPONSE:\n", string(body))
-
 	// Read the entire body
-	snapshot, err := c.parser.ParseOrderBook(body)
+	snapshot, err := c.parser.ParseOrderBookSnapshot(body, c.pair)
 	if err != nil {
 		return fmt.Errorf("Failed to decode snapshot: %w", err)
 	}
 
-	// Save snapshot in DB
 	c.lastUpdateID = snapshot.LastUpdateID
 	select {
 	case obChan <- *snapshot:
@@ -134,8 +129,8 @@ func (c *WSClient) FetchInitialOrderBook(obChan chan<- market.OrderBookUpdate) e
 		logger.Warn("Snapshot dropped (channel full)")
 	}
 
-	logger.Info("Initial order book snapshot loaded: %s Bids:%d Asks:%d",
-		snapshot.Pair, len(snapshot.Bids), len(snapshot.Asks))
+	logger.Info("Initial order book snapshot loaded: %s Bids:%d Asks:%d lastUpdateID:%d",
+		snapshot.Pair, len(snapshot.Bids), len(snapshot.Asks), snapshot.LastUpdateID)
 
 	return nil
 }
@@ -143,17 +138,11 @@ func (c *WSClient) FetchInitialOrderBook(obChan chan<- market.OrderBookUpdate) e
 // readLoop reads WS → pushes raw messages
 func (c *WSClient) readLoop(ctx context.Context) {
 	firstMessage := true
-	timeout := time.After(5 * time.Second)
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-timeout:
-			if firstMessage {
-				logger.Warn("No WS message received in 5 seconds")
-				firstMessage = false
-			}
 		default:
 			_, message, err := c.conn.ReadMessage()
 			if err != nil {
@@ -165,7 +154,6 @@ func (c *WSClient) readLoop(ctx context.Context) {
 				logger.Info("WebSocket is active: first message received")
 				firstMessage = false
 			}
-			fmt.Println("Message:", string(message))
 			select {
 			case <-c.snapshotDone:
 				c.rawChan <- message
@@ -204,5 +192,5 @@ func (c *WSClient) processMessage(msg []byte, tradeChan chan<- market.Trade, obC
 		return
 	}
 
-	logger.Info("Unknown message: %s", string(msg))
+	logger.Warn("Unknown message: %s", string(msg))
 }

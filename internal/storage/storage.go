@@ -44,7 +44,7 @@ func (s *InMemoryStorage) Run(ctx context.Context, trades <-chan market.Trade, o
 			logger.Info("Trade saved: %s %f @ %f", t.Pair, t.Size, t.Price)
 		case ob, ok := <-obs:
 			if !ok {
-				trades = nil
+				obs = nil
 				continue
 			}
 			s.mu.Lock()

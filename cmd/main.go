@@ -26,7 +26,7 @@ func main() {
 	defer cancel()
 
 	parser := &binance.BinanceParser{}
-	client := ws.NewClient("wss://fstream.binance.com/ws/btcusdt@depth", storage, parser)
+	client := ws.NewClient("wss://fstream.binance.com/ws/btcusdt@depth", storage, parser, "BTCUSDT")
 	client.Connect(ctx)
 
 	// Run indefinitely
