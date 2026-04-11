@@ -62,10 +62,10 @@ func (b *BinanceParser) ParseOrderBookSnapshot(msg []byte, pair string) (*market
 		Asks         [][2]string `json:"asks"`
 	}
 	if err := json.Unmarshal(msg, &raw); err != nil {
-		return nil, fmt.Errorf("failed to decode snapshot: %w", err)
+		return nil, fmt.Errorf("Failed to decode snapshot: %w", err)
 	}
 	if raw.LastUpdateId == 0 {
-		return nil, fmt.Errorf("snapshot missing lastUpdateId")
+		return nil, fmt.Errorf("Snapshot missing lastUpdateId")
 	}
 	return &market.OrderBookUpdate{
 		Pair:         pair,

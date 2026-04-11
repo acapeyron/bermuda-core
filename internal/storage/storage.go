@@ -4,7 +4,6 @@ import (
 	"context"
 	"sync"
 
-	"github.com/acapeyron/bermuda-core/internal/logger"
 	"github.com/acapeyron/bermuda-core/internal/market"
 )
 
@@ -41,7 +40,7 @@ func (s *InMemoryStorage) Run(ctx context.Context, trades <-chan market.Trade, o
 			s.mu.Lock()
 			s.Trades = append(s.Trades, t)
 			s.mu.Unlock()
-			logger.Info("Trade saved: %s %f @ %f", t.Pair, t.Size, t.Price)
+			// logger.Info("Trade saved: %s %f @ %f", t.Pair, t.Size, t.Price)
 		case ob, ok := <-obs:
 			if !ok {
 				obs = nil
@@ -50,7 +49,7 @@ func (s *InMemoryStorage) Run(ctx context.Context, trades <-chan market.Trade, o
 			s.mu.Lock()
 			s.Orders = append(s.Orders, ob)
 			s.mu.Unlock()
-			logger.Info("OrderBook saved: %s Bids:%d Asks:%d", ob.Pair, len(ob.Bids), len(ob.Asks))
+			// logger.Info("OrderBook saved: %s Bids:%d Asks:%d", ob.Pair, len(ob.Bids), len(ob.Asks))
 		}
 	}
 }

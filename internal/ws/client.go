@@ -98,54 +98,20 @@ func (c *WSClient) drainBuffer() {
 }
 
 func (c *WSClient) fetchInitialOrderBook(obChan chan<- market.OrderBookUpdate) error {
-	endpoint := fmt.Sprintf(
-		"https://fapi.binance.com/fapi/v1/depth?symbol=%s&limit=1000",
-		c.pair,
-	)
-
-	var resp *http.Response
-	var err error
-
-	// Retry logic
-	for i := 0; i < 3; i++ {
-		// New timeout PER attempt
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-
-		req, _ := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
-		resp, err = http.DefaultClient.Do(req)
-
-		cancel() // always release resources
-
-		if err == nil && resp != nil && resp.StatusCode == http.StatusOK {
-			break
-		}
-
-		logger.Warn("Snapshot attempt %d failed: %v", i+1, err)
-		time.Sleep(200 * time.Millisecond)
-	}
-
-	// Hard fail after retries
-	if err != nil || resp == nil {
-		return fmt.Errorf("failed to fetch snapshot after retries: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("bad status after retries: %d", resp.StatusCode)
-	}
-
-	body, err := io.ReadAll(resp.Body)
+	body, err := c.fetchSnapshotHTTP()
 	if err != nil {
-		return fmt.Errorf("failed to read body: %w", err)
+		return err
 	}
 
-	snapshot, err := c.parser.ParseOrderBookSnapshot(body, c.pair)
+	snapshot, err := c.parseSnapshot(body)
 	if err != nil {
-		return fmt.Errorf("failed to decode snapshot: %w", err)
+		return err
 	}
 
+	// State update
 	c.lastUpdateID = snapshot.LastUpdateID
 
+	// Dispatch
 	select {
 	case obChan <- *snapshot:
 	default:
@@ -158,6 +124,56 @@ func (c *WSClient) fetchInitialOrderBook(obChan chan<- market.OrderBookUpdate) e
 	)
 
 	return nil
+}
+
+func (c *WSClient) fetchSnapshotHTTP() ([]byte, error) {
+	endpoint := fmt.Sprintf(
+		"https://fapi.binance.com/fapi/v1/depth?symbol=%s&limit=1000",
+		c.pair,
+	)
+
+	var resp *http.Response
+	var err error
+
+	for i := 0; i < 3; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+
+		req, _ := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
+		resp, err = http.DefaultClient.Do(req)
+
+		cancel()
+
+		if err == nil && resp != nil && resp.StatusCode == http.StatusOK {
+			break
+		}
+
+		logger.Warn("Snapshot HTTP attempt %d failed: %v", i+1, err)
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	if err != nil || resp == nil {
+		return nil, fmt.Errorf("snapshot HTTP failed after retries: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("bad status: %d", resp.StatusCode)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read body: %w", err)
+	}
+
+	return body, nil
+}
+
+func (c *WSClient) parseSnapshot(body []byte) (*market.OrderBookUpdate, error) {
+	snapshot, err := c.parser.ParseOrderBookSnapshot(body, c.pair)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode snapshot: %w", err)
+	}
+	return snapshot, nil
 }
 
 // readLoop reads WS → pushes raw messages
