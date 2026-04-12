@@ -1,4 +1,3 @@
-// internal/config/config.go
 package config
 
 import (
@@ -9,7 +8,7 @@ import (
 )
 
 type Config struct {
-	Exchanges []ExchangeConfig `yaml:"exchanges"`
+	Exchange ExchangeConfig `yaml:"exchange"`
 }
 
 type ExchangeConfig struct {
@@ -38,12 +37,10 @@ func Load(path string) (*Config, error) {
 	}
 
 	// Build URLs from base_url + symbol
-	for i, exchange := range cfg.Exchanges {
-		for j, pair := range exchange.Pairs {
-			symbol := strings.ToLower(pair.Symbol)
-			cfg.Exchanges[i].Pairs[j].SnapshotURL = strings.ReplaceAll(exchange.BaseSnapshotURL, "{symbol}", symbol)
-			cfg.Exchanges[i].Pairs[j].WSURL = strings.ReplaceAll(exchange.BaseWSURL, "{symbol}", symbol)
-		}
+	for j, pair := range cfg.Exchange.Pairs {
+		symbol := strings.ToLower(pair.Symbol)
+		cfg.Exchange.Pairs[j].SnapshotURL = strings.ReplaceAll(cfg.Exchange.BaseSnapshotURL, "{symbol}", symbol)
+		cfg.Exchange.Pairs[j].WSURL = strings.ReplaceAll(cfg.Exchange.BaseWSURL, "{symbol}", symbol)
 	}
 
 	return &cfg, nil

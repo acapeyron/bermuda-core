@@ -214,14 +214,11 @@ func (c *WSClient) readLoop(ctx context.Context) {
 
 // processLoop consumes rawChan → routes to storage channels
 func (c *WSClient) processLoop(ctx context.Context, tradeChan chan<- market.Trade, obChan chan<- market.OrderBookUpdate) {
-	logger.Info("[%s/%s] processLoop started", c.exchange, c.pair)
 	for {
 		select {
 		case <-ctx.Done():
-			logger.Info("[%s/%s] processLoop stopped", c.exchange, c.pair)
 			return
 		case msg := <-c.rawChan:
-			logger.Info("[%s/%s] processLoop got message", c.exchange, c.pair) // ← temporary
 			c.processMessage(msg, tradeChan, obChan)
 		}
 	}

@@ -1,5 +1,5 @@
-exchanges:
-  - name: binance
+exchange:
+    name: binance
     base_snapshot_url: https://fapi.binance.com/fapi/v1/depth?symbol={symbol}&limit=1000
     base_ws_url: wss://fstream.binance.com/ws/{symbol}@depth
     pairs:
