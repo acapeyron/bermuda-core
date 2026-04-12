@@ -24,7 +24,7 @@ func main() {
 	storage := storage.NewInMemoryStorage()
 	logger.Info("Connected to DB")
 
-	cfg, err := config.Load("../config.yaml")
+	cfg, err := config.Load("../config/config.yaml")
 	if err != nil {
 		logger.Error("Failed to load config: %v", err)
 		os.Exit(1)
@@ -51,7 +51,7 @@ func main() {
 				return
 			case ob := <-client.ObChan:
 				// TODO: detector.UpdateOrderBook(ob)
-				logger.Info("[OB] %s Bids:%d Asks:%d lastUpdateID:%d",
+				logger.Info("[%s] %s Bids:%d Asks:%d lastUpdateID:%d", cfg.Exchange.Name,
 					ob.Pair, len(ob.Bids), len(ob.Asks), ob.LastUpdateID)
 			}
 		}
