@@ -11,7 +11,6 @@ import (
 	"github.com/acapeyron/bermuda-core/internal/config"
 	"github.com/acapeyron/bermuda-core/internal/logger"
 	"github.com/acapeyron/bermuda-core/internal/registry"
-	"github.com/acapeyron/bermuda-core/internal/storage"
 	"github.com/acapeyron/bermuda-core/internal/ws"
 )
 
@@ -19,10 +18,6 @@ func main() {
 	figure.NewFigure("Bermuda Core", "", true).Print()
 	// Initialize logger
 	logger.Init()
-
-	// Initialize storage (DB abstraite)
-	storage := storage.NewInMemoryStorage()
-	logger.Info("Connected to DB")
 
 	cfg, err := config.Load("../config/config.yaml")
 	if err != nil {
@@ -40,7 +35,7 @@ func main() {
 	defer cancel()
 
 	// One client for all pairs
-	client := ws.NewClient(cfg.Exchange.Name, cfg.Exchange.BaseWSURL, cfg.Exchange.Pairs, storage, parser)
+	client := ws.NewClient(cfg.Exchange.Name, cfg.Exchange.BaseWSURL, cfg.Exchange.Pairs, parser)
 	go client.Connect(ctx, cancel)
 
 	// Consuming OrderBookUpdates
@@ -49,7 +44,7 @@ func main() {
 			select {
 			case <-ctx.Done():
 				return
-			case ob := <-client.ObChan:
+			case ob := <-client.ObChan():
 				// TODO: detector.UpdateOrderBook(ob)
 				logger.Info("[%s] %s Bids:%d Asks:%d lastUpdateID:%d", cfg.Exchange.Name,
 					ob.Pair, len(ob.Bids), len(ob.Asks), ob.LastUpdateID)
