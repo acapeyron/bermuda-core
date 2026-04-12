@@ -6,20 +6,17 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/common-nighthawk/go-figure"
+	figure "github.com/common-nighthawk/go-figure"
 
 	"github.com/acapeyron/bermuda-core/internal/config"
 	"github.com/acapeyron/bermuda-core/internal/logger"
-	"github.com/acapeyron/bermuda-core/internal/market"
 	"github.com/acapeyron/bermuda-core/internal/registry"
 	"github.com/acapeyron/bermuda-core/internal/storage"
 	"github.com/acapeyron/bermuda-core/internal/ws"
 )
 
 func main() {
-	myFigure := figure.NewFigure("Bermuda Core", "", true)
-	myFigure.Print()
-
+	figure.NewFigure("Bermuda Core", "", true).Print()
 	// Initialize logger
 	logger.Init()
 
@@ -33,25 +30,32 @@ func main() {
 		os.Exit(1)
 	}
 
+	parser, err := registry.NewParser(cfg.Exchange.Name)
+	if err != nil {
+		logger.Error("Unknown exchange: %v", err)
+		os.Exit(1)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	parser, err := registry.NewParser(cfg.Exchange.Name)
-	if err != nil {
-		logger.Warn("Skipping exchange %s: %v", cfg.Exchange.Name, err)
-	}
-	for _, pair := range cfg.Exchange.Pairs {
-		go func(pair config.PairConfig, parser market.Parser) {
-			clientCtx, clientCancel := context.WithCancel(ctx)
-			defer clientCancel()
+	// One client for all pairs
+	client := ws.NewClient(cfg.Exchange.Name, cfg.Exchange.BaseWSURL, cfg.Exchange.Pairs, storage, parser)
+	go client.Connect(ctx, cancel)
 
-			client := ws.NewClient(cfg.Exchange.Name, pair, storage, parser)
-			client.Connect(clientCtx, clientCancel)
-
-			<-clientCtx.Done()
-			logger.Warn("[%s/%s] Client stopped: %v", cfg.Exchange.Name, pair.Symbol, clientCtx.Err())
-		}(pair, parser)
-	}
+	// Consuming OrderBookUpdates
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case ob := <-client.ObChan:
+				// TODO: detector.UpdateOrderBook(ob)
+				logger.Info("[OB] %s Bids:%d Asks:%d lastUpdateID:%d",
+					ob.Pair, len(ob.Bids), len(ob.Asks), ob.LastUpdateID)
+			}
+		}
+	}()
 
 	// Block until CTRL+C or kill signal
 	quit := make(chan os.Signal, 1)

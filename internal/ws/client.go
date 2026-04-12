@@ -6,6 +6,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -17,156 +19,168 @@ import (
 )
 
 type WSClient struct {
-	wsURL        string
-	snapshotURL  string
-	conn         *websocket.Conn
-	rawChan      chan []byte
-	db           storage.Storage
-	parser       market.Parser
-	lastUpdateID int64 // initial snapshot lastupdateId
-	exchange     string
-	pair         string
+	wsURL         string
+	snapshotURLs  map[string]string // pair → snapshot URL
+	conn          *websocket.Conn
+	rawChan       chan []byte
+	db            storage.Storage
+	ObChan        chan market.OrderBookUpdate
+	parser        market.Parser
+	lastUpdateIDs map[string]int64 // pair → lastUpdateID
+	exchange      string
 
 	preSnapshotChan chan []byte   // buffer WS messages before snapshot is loaded
 	snapshotDone    chan struct{} // indicates REST snapshot is loaded
-
 }
 
-func NewClient(exchange string, pair config.PairConfig, db storage.Storage, parser market.Parser) *WSClient {
+func NewClient(exchange string, baseWSURL string, pairs []config.PairConfig, db storage.Storage, parser market.Parser) *WSClient {
+	// Build combined URL : btcusdt@depth/ethusdt@depth/...
+	streams := make([]string, len(pairs))
+	snapshotURLs := make(map[string]string, len(pairs))
+	for i, p := range pairs {
+		streams[i] = p.WSStream // e.g. "btcusdt@depth"
+		snapshotURLs[p.Symbol] = p.SnapshotURL
+	}
+	wsURL := baseWSURL + strings.Join(streams, "/")
+
 	return &WSClient{
-		wsURL:           pair.WSURL,
-		snapshotURL:     pair.SnapshotURL,
-		rawChan:         make(chan []byte, 1000),
+		wsURL:           wsURL,
+		snapshotURLs:    snapshotURLs,
+		rawChan:         make(chan []byte, 5000),
 		db:              db,
+		ObChan:          make(chan market.OrderBookUpdate, 5000),
 		parser:          parser,
 		exchange:        exchange,
-		pair:            pair.Symbol,
-		preSnapshotChan: make(chan []byte, 1000),
+		lastUpdateIDs:   make(map[string]int64),
+		preSnapshotChan: make(chan []byte, 5000),
 		snapshotDone:    make(chan struct{}),
 	}
 }
 
 func (c *WSClient) Connect(ctx context.Context, cancel context.CancelFunc) {
 	u, _ := url.Parse(c.wsURL)
-	logger.Info("[%s/%s] Connecting to WebSocket %s", c.exchange, c.pair, u.String())
+	logger.Info("[%s] Connecting to combined stream: %s", c.exchange, u.String())
 
 	// Channels for storage
-	tradeChan := make(chan market.Trade, 100)
 	obChan := make(chan market.OrderBookUpdate, 100)
 
-	go c.db.Run(ctx, tradeChan, obChan)
+	go c.db.Run(ctx, obChan)
 
 	// WS connection
 	var err error
 	c.conn, _, err = websocket.DefaultDialer.Dial(c.wsURL, nil)
 	if err != nil {
-		logger.Error("[%s/%s] WebSocket connect error: %v", c.exchange, c.pair, err)
+		logger.Error("[%s] WebSocket connect error: %v", c.exchange, err)
+		cancel()
 		return
 	}
-	logger.Info("[%s/%s] WebSocket connected to %s", c.exchange, c.pair, u.String())
+	logger.Info("[%s] WebSocket connected", c.exchange)
 
 	// Start WS read loop and buffer messages
 	go c.readLoop(ctx)
 
-	// Initial GET request to get snapshot
-	if err := c.fetchInitialOrderBook(obChan); err != nil {
-		logger.Error("[%s/%s] Failed to fetch initial order book: %v — shutting down client", c.exchange, c.pair, err)
+	// Fetch snapshots for all pairs concurrently
+	if err := c.fetchInitialOrderBook(); err != nil {
+		logger.Error("[%s] Failed to fetch snapshots: %v", c.exchange, err)
 		cancel()
 		return
 	}
 
-	logger.Info("[%s/%s] Initial order book snapshot fetched successfully", c.exchange, c.pair)
-
 	close(c.snapshotDone)
-	// Drain buffered messages into rawChan
 	c.drainBuffer()
 
-	// Start processing loop
-	go c.processLoop(ctx, tradeChan, obChan)
+	go c.processLoop(ctx)
 
 	<-ctx.Done()
-	logger.Warn("[%s/%s] Client shutting down: %v", c.exchange, c.pair, ctx.Err())
+	logger.Warn("[%s] Client shutting down: %v", c.exchange, ctx.Err())
 	c.conn.Close()
 }
 
 // drainBuffer drains preSnapshotChan into rawChan after snapshot
-
 func (c *WSClient) drainBuffer() {
-	logger.Info("[%s/%s] Draining pre-snapshot buffer...", c.exchange, c.pair)
+	logger.Info("[%s] Draining pre-snapshot buffer...", c.exchange)
 	for {
 		select {
 		case msg := <-c.preSnapshotChan:
 			if ob, err := c.parser.ParseOrderBook(msg); err == nil && ob != nil {
-				if ob.LastUpdateID <= c.lastUpdateID {
+				if ob.LastUpdateID <= c.lastUpdateIDs[ob.Pair] {
 					continue
 				}
 			}
 			c.rawChan <- msg
 		default:
-			logger.Info("[%s/%s] Buffer fully drained", c.exchange, c.pair)
+			logger.Info("[%s] Buffer fully drained", c.exchange)
 			return
 		}
 	}
 }
 
-func (c *WSClient) fetchInitialOrderBook(obChan chan<- market.OrderBookUpdate) error {
-	body, err := c.fetchSnapshotHTTP()
-	if err != nil {
+func (c *WSClient) fetchInitialOrderBook() error {
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	errCh := make(chan error, len(c.snapshotURLs))
+
+	for pair, url := range c.snapshotURLs {
+		wg.Add(1)
+		go func(pair, url string) {
+			defer wg.Done()
+
+			body, err := c.fetchSnapshotHTTP(pair, url)
+			if err != nil {
+				errCh <- fmt.Errorf("snapshot failed for %s: %w", pair, err)
+				return
+			}
+
+			snapshot, err := c.parseSnapshot(body, pair)
+			if err != nil {
+				return
+			}
+
+			mu.Lock()
+			c.lastUpdateIDs[pair] = snapshot.LastUpdateID
+			mu.Unlock()
+
+			c.ObChan <- *snapshot
+			logger.Info("[%s/%s] Snapshot loaded: Bids:%d Asks:%d lastUpdateID:%d",
+				c.exchange, pair, len(snapshot.Bids), len(snapshot.Asks), snapshot.LastUpdateID)
+		}(pair, url)
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	// return first error if any
+	if err := <-errCh; err != nil {
 		return err
 	}
-
-	snapshot, err := c.parseSnapshot(body)
-	if err != nil {
-		return err
-	}
-
-	// State update
-	c.lastUpdateID = snapshot.LastUpdateID
-
-	// Dispatch
-	select {
-	case obChan <- *snapshot:
-	default:
-		logger.Warn("Snapshot dropped (channel full)")
-	}
-
-	logger.Info(
-		"[%s/%s] Initial order book snapshot loaded: %s Bids:%d Asks:%d lastUpdateID:%d", c.exchange, c.pair,
-		snapshot.Pair, len(snapshot.Bids), len(snapshot.Asks), snapshot.LastUpdateID,
-	)
-
 	return nil
 }
 
-func (c *WSClient) fetchSnapshotHTTP() ([]byte, error) {
+func (c *WSClient) fetchSnapshotHTTP(pair, url string) ([]byte, error) {
 	var resp *http.Response
 	var err error
 
 	for i := 0; i < 3; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-
-		req, _ := http.NewRequestWithContext(ctx, "GET", c.snapshotURL, nil)
+		req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
 		resp, err = http.DefaultClient.Do(req)
-
 		cancel()
 
 		if err == nil && resp != nil && resp.StatusCode == http.StatusOK {
 			break
 		}
-
-		logger.Warn("[%s/%s] Snapshot HTTP attempt %d failed: %v", c.exchange, c.pair, i+1, err)
+		logger.Warn("[%s/%s] Snapshot HTTP attempt %d failed: %v", c.exchange, pair, i+1, err)
 		time.Sleep(200 * time.Millisecond)
 	}
 
 	if err != nil || resp == nil {
-		return nil, fmt.Errorf("Snapshot HTTP failed after retries: %w", err)
+		return nil, fmt.Errorf("snapshot HTTP failed after retries: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Bad status: %d", resp.StatusCode)
+		return nil, fmt.Errorf("bad status: %d", resp.StatusCode)
 	}
-
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("Failed to read body: %w", err)
@@ -175,8 +189,8 @@ func (c *WSClient) fetchSnapshotHTTP() ([]byte, error) {
 	return body, nil
 }
 
-func (c *WSClient) parseSnapshot(body []byte) (*market.OrderBookUpdate, error) {
-	snapshot, err := c.parser.ParseOrderBookSnapshot(body, c.pair)
+func (c *WSClient) parseSnapshot(body []byte, pair string) (*market.OrderBookUpdate, error) {
+	snapshot, err := c.parser.ParseOrderBookSnapshot(body, pair)
 	if err != nil {
 		return nil, fmt.Errorf("Failed to decode snapshot: %w", err)
 	}
@@ -186,7 +200,6 @@ func (c *WSClient) parseSnapshot(body []byte) (*market.OrderBookUpdate, error) {
 // readLoop reads WS → pushes raw messages
 func (c *WSClient) readLoop(ctx context.Context) {
 	firstMessage := true
-
 	for {
 		select {
 		case <-ctx.Done():
@@ -194,12 +207,12 @@ func (c *WSClient) readLoop(ctx context.Context) {
 		default:
 			_, message, err := c.conn.ReadMessage()
 			if err != nil {
-				logger.Error("[%s/%s] Read error: %v", c.exchange, c.pair, err)
+				logger.Error("[%s] Read error: %v", c.exchange, err)
 				time.Sleep(time.Second)
 				continue
 			}
 			if firstMessage {
-				logger.Info("[%s/%s] WebSocket is active: first message received", c.exchange, c.pair)
+				logger.Info("[%s] WebSocket active: first message received", c.exchange)
 				firstMessage = false
 			}
 			select {
@@ -213,33 +226,30 @@ func (c *WSClient) readLoop(ctx context.Context) {
 }
 
 // processLoop consumes rawChan → routes to storage channels
-func (c *WSClient) processLoop(ctx context.Context, tradeChan chan<- market.Trade, obChan chan<- market.OrderBookUpdate) {
+func (c *WSClient) processLoop(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case msg := <-c.rawChan:
-			c.processMessage(msg, tradeChan, obChan)
+			c.processMessage(msg)
 		}
 	}
 }
 
-func (c *WSClient) processMessage(msg []byte, tradeChan chan<- market.Trade, obChan chan<- market.OrderBookUpdate) {
-	if trade, err := c.parser.ParseTrade(msg); err == nil && trade != nil {
-		tradeChan <- *trade
-		logger.Info("[%s/%s] Trade routed: %s %f @ %f", c.exchange, c.pair, trade.Pair, trade.Size, trade.Price)
+func (c *WSClient) processMessage(msg []byte) {
+	ob, err := c.parser.ParseOrderBook(msg)
+	if err != nil || ob == nil {
+		logger.Warn("[%s] Unknown or unparseable message: %s", c.exchange, string(msg))
 		return
 	}
 
-	if ob, err := c.parser.ParseOrderBook(msg); err == nil && ob != nil {
-		if ob.LastUpdateID <= c.lastUpdateID {
-			logger.Warn("[%s/%s] Dropping stale update: %d <= %d", c.exchange, c.pair, ob.LastUpdateID, c.lastUpdateID)
-			return
-		}
-		obChan <- *ob
-		logger.Info("[%s/%s] OrderBook routed: %s Bids:%d Asks:%d", c.exchange, c.pair, ob.Pair, len(ob.Bids), len(ob.Asks))
+	lastID, known := c.lastUpdateIDs[ob.Pair]
+	if known && ob.LastUpdateID <= lastID {
+		logger.Warn("[%s/%s] Dropping stale update: %d <= %d", c.exchange, ob.Pair, ob.LastUpdateID, lastID)
 		return
 	}
 
-	logger.Warn("[%s/%s] Unknown message: %s", c.exchange, c.pair, string(msg))
+	c.lastUpdateIDs[ob.Pair] = ob.LastUpdateID
+	c.ObChan <- *ob
 }

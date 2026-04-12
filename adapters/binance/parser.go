@@ -10,27 +10,6 @@ import (
 
 type BinanceParser struct{}
 
-func (b *BinanceParser) ParseTrade(msg []byte) (*market.Trade, error) {
-	var raw struct {
-		Event     string `json:"e"`
-		Symbol    string `json:"s"`
-		Price     string `json:"p"`
-		Qty       string `json:"q"`
-		Timestamp int64  `json:"T"`
-	}
-	if err := json.Unmarshal(msg, &raw); err != nil || raw.Event != "trade" {
-		return nil, err
-	}
-	price, _ := strconv.ParseFloat(raw.Price, 64)
-	qty, _ := strconv.ParseFloat(raw.Qty, 64)
-	return &market.Trade{
-		Pair:      raw.Symbol,
-		Price:     price,
-		Size:      qty,
-		Timestamp: raw.Timestamp,
-	}, nil
-}
-
 func (b *BinanceParser) ParseOrderBook(msg []byte) (*market.OrderBookUpdate, error) {
 	var raw struct {
 		Event        string      `json:"e"`

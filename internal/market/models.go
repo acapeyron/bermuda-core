@@ -12,11 +12,3 @@ type OrderBookUpdate struct {
 	Timestamp    int64   `json:"timestamp"`
 	LastUpdateID int64   `json:"last_update_id"`
 }
-
-type Trade struct {
-	Pair      string  `json:"pair"`
-	Price     float64 `json:"price"`
-	Size      float64 `json:"size"`
-	Side      string  `json:"side"` // "buy" or "sell"
-	Timestamp int64   `json:"timestamp"`
-}

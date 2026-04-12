@@ -20,8 +20,8 @@ type ExchangeConfig struct {
 
 type PairConfig struct {
 	Symbol      string `yaml:"symbol"`
-	SnapshotURL string // computed
-	WSURL       string // computed
+	SnapshotURL string // computed: REST endpoint for initial snapshot
+	WSStream    string // computed: e.g. "btcusdt@depth"
 }
 
 func Load(path string) (*Config, error) {
@@ -40,7 +40,7 @@ func Load(path string) (*Config, error) {
 	for j, pair := range cfg.Exchange.Pairs {
 		symbol := strings.ToLower(pair.Symbol)
 		cfg.Exchange.Pairs[j].SnapshotURL = strings.ReplaceAll(cfg.Exchange.BaseSnapshotURL, "{symbol}", symbol)
-		cfg.Exchange.Pairs[j].WSURL = strings.ReplaceAll(cfg.Exchange.BaseWSURL, "{symbol}", symbol)
+		cfg.Exchange.Pairs[j].WSStream = symbol + "@depth"
 	}
 
 	return &cfg, nil
