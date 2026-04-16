@@ -57,7 +57,7 @@ func (m *OrderBookManager) FetchAllSnapshots() error {
 			m.mu.Unlock()
 
 			m.obChan <- *snapshot
-			logger.Info("[%s/%s] Snapshot loaded: Bids:%d Asks:%d lastUpdateID:%d",
+			logger.Info("[%s] %s Snapshot loaded: Bids:%d Asks:%d lastUpdateID:%d",
 				m.exchange, pair, len(snapshot.Bids), len(snapshot.Asks), snapshot.LastUpdateID)
 		}(pair, url)
 	}

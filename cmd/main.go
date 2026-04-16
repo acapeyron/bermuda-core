@@ -8,6 +8,7 @@ import (
 
 	figure "github.com/common-nighthawk/go-figure"
 
+	"github.com/acapeyron/bermuda-core/internal/arb"
 	"github.com/acapeyron/bermuda-core/internal/config"
 	"github.com/acapeyron/bermuda-core/internal/logger"
 	"github.com/acapeyron/bermuda-core/internal/registry"
@@ -38,6 +39,8 @@ func main() {
 	client := ws.NewClient(cfg.Exchange.Name, cfg.Exchange.BaseWSURL, cfg.Exchange.Pairs, parser)
 	go client.Connect(ctx, cancel)
 
+	det := arb.NewTriangleDetector(0.001) // 0.1% taker fee
+
 	// Consuming OrderBookUpdates
 	go func() {
 		for {
@@ -45,9 +48,11 @@ func main() {
 			case <-ctx.Done():
 				return
 			case ob := <-client.ObChan():
-				// TODO: detector.UpdateOrderBook(ob)
+				det.UpdateOrderBook(&ob)
 				logger.Info("[%s] %s Bids:%d Asks:%d lastUpdateID:%d", cfg.Exchange.Name,
 					ob.Pair, len(ob.Bids), len(ob.Asks), ob.LastUpdateID)
+			case op := <-det.OpChan:
+				logger.Info("[OPPORTUNITY] profit=+%.4f%% legs=%v", op.ProfitPct, op.Legs)
 			}
 		}
 	}()
