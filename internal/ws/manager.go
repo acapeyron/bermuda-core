@@ -34,12 +34,15 @@ func NewOrderBookManager(exchange string, snapshotURLs map[string]string, parser
 func (m *OrderBookManager) FetchAllSnapshots() error {
 	var wg sync.WaitGroup
 	errCh := make(chan error, len(m.snapshotURLs))
+	sem := make(chan struct{}, 3) // max 3 requêtes en parallèle
 
 	for pair, url := range m.snapshotURLs {
 		wg.Add(1)
 		go func(pair, url string) {
 			defer wg.Done()
 
+			sem <- struct{}{}
+			defer func() { <-sem }()
 			body, err := m.fetchSnapshotHTTP(pair, url)
 			if err != nil {
 				errCh <- fmt.Errorf("snapshot failed for %s: %w", pair, err)
@@ -101,6 +104,8 @@ func (m *OrderBookManager) fetchSnapshotHTTP(pair, url string) ([]byte, error) {
 	var resp *http.Response
 	var err error
 
+	delay := 200 * time.Millisecond
+
 	for i := 0; i < 3; i++ {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
@@ -111,7 +116,8 @@ func (m *OrderBookManager) fetchSnapshotHTTP(pair, url string) ([]byte, error) {
 			break
 		}
 		logger.Warn("[%s/%s] Snapshot attempt %d failed: %v", m.exchange, pair, i+1, err)
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(delay)
+		delay *= 2
 	}
 
 	if err != nil || resp == nil {
