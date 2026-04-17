@@ -56,7 +56,12 @@ func main() {
 	client := ws.NewClient(cfg.Exchange.Name, cfg.Exchange.BaseWSURL, cfg.Exchange.Pairs, parser)
 	go client.Connect(ctx, cancel)
 
-	det := arb.NewTriangleDetector(0.001) // 0.1% taker fee
+	symbols := make([]string, 0, len(cfg.Exchange.Pairs))
+	for _, p := range cfg.Exchange.Pairs {
+		symbols = append(symbols, p.Symbol)
+	}
+
+	det := arb.NewTriangleDetector(0.001, symbols) // 0.1% taker fee
 
 	// Consuming OrderBookUpdates
 	go func() {
