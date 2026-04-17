@@ -2,23 +2,40 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/signal"
 	"syscall"
 
-	figure "github.com/common-nighthawk/go-figure"
-
 	"github.com/acapeyron/bermuda-core/internal/arb"
 	"github.com/acapeyron/bermuda-core/internal/config"
 	"github.com/acapeyron/bermuda-core/internal/logger"
+	"github.com/acapeyron/bermuda-core/internal/notifier"
 	"github.com/acapeyron/bermuda-core/internal/registry"
 	"github.com/acapeyron/bermuda-core/internal/ws"
+	figure "github.com/common-nighthawk/go-figure"
+	"github.com/joho/godotenv"
 )
 
 func main() {
 	figure.NewFigure("Bermuda Core", "", true).Print()
 	// Initialize logger
 	logger.Init()
+
+	err := godotenv.Load("../.env")
+	if err != nil {
+		logger.Error("No .env file found")
+	}
+
+	token := os.Getenv("TELEGRAM_TOKEN")
+	chatID := os.Getenv("TELEGRAM_CHATID")
+
+	if token == "" || chatID == "" {
+		logger.Error("Missing TELEGRAM config")
+		os.Exit(1)
+	}
+
+	telegramNotifier := notifier.New(token, chatID)
 
 	cfg, err := config.Load("../config/config.yaml")
 	if err != nil {
@@ -49,9 +66,10 @@ func main() {
 				return
 			case ob := <-client.ObChan():
 				det.UpdateOrderBook(&ob)
-				logger.Info("[%s] %s Bids:%d Asks:%d lastUpdateID:%d", cfg.Exchange.Name,
-					ob.Pair, len(ob.Bids), len(ob.Asks), ob.LastUpdateID)
+				// logger.Info("[%s] %s Bids:%d Asks:%d lastUpdateID:%d", cfg.Exchange.Name,
+				// 	ob.Pair, len(ob.Bids), len(ob.Asks), ob.LastUpdateID)
 			case op := <-det.OpChan:
+				go telegramNotifier.Send(fmt.Sprintf("🔺 Arb detected! profit=+%.4f%%\nLegs: %v", op.ProfitPct, op.Legs))
 				logger.Info("[OPPORTUNITY] profit=+%.4f%% legs=%v", op.ProfitPct, op.Legs)
 			}
 		}

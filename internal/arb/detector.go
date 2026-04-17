@@ -51,7 +51,7 @@ func NewTriangleDetector(fee float64) *TriangleDetector {
 			"ETHUSDT": {},
 			"ETHBTC":  {},
 		},
-		OpChan: make(chan Opportunity, 64),
+		OpChan: make(chan Opportunity, 1024),
 	}
 }
 
