@@ -14,6 +14,7 @@ type Leg struct {
 }
 
 type Opportunity struct {
+	Triangle  string
 	Legs      [3]Leg
 	EntryRate float64
 	ProfitPct float64
@@ -104,6 +105,7 @@ func (d *TriangleDetector) evaluate() {
 			pct := (rate - 1.0) * 100
 			logger.Info("[DETECTOR] %s  profit=+%.4f%%  rate=%.8f", tri.Name, pct, rate)
 			d.emit(tri.Name, Opportunity{
+				Triangle:  tri.Name,
 				Legs:      tri.Legs,
 				EntryRate: rate,
 				ProfitPct: pct,

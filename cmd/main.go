@@ -74,7 +74,7 @@ func main() {
 				// logger.Info("[%s] %s Bids:%d Asks:%d lastUpdateID:%d", cfg.Exchange.Name,
 				// 	ob.Pair, len(ob.Bids), len(ob.Asks), ob.LastUpdateID)
 			case op := <-det.OpChan:
-				go telegramNotifier.Send(fmt.Sprintf("🔺 Arb detected! profit=+%.4f%%\nLegs: %v", op.ProfitPct, op.Legs))
+				go telegramNotifier.Send(fmt.Sprintf("🔺 Arb detected! profit=+%.4f%%\nTriangle: %v\nLegs: %v", op.ProfitPct, op.Triangle, op.Legs))
 				logger.Info("[OPPORTUNITY] profit=+%.4f%% legs=%v", op.ProfitPct, op.Legs)
 			}
 		}
