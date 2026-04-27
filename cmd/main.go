@@ -61,7 +61,7 @@ func main() {
 		symbols = append(symbols, p.Symbol)
 	}
 
-	det := arb.NewTriangleDetector(0.001, symbols) // 0.1% taker fee
+	det := arb.NewTriangleDetector(0.00011, symbols) // 0.1% taker fee
 
 	// Consuming OrderBookUpdates
 	go func() {

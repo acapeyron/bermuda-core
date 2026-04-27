@@ -1,16 +1,16 @@
 exchange:
     name: binance
-    base_snapshot_url: https://fapi.binance.com/fapi/v1/depth?symbol={symbol}&limit=1000
-    base_ws_url: wss://fstream.binance.com/ws/
+    base_snapshot_url: https://api.binance.com/api/v3/depth?symbol={symbol}&limit=1000
+    base_ws_url: wss://stream.binance.com/stream?streams=
     pairs:
       # Majors (baseline)
     - symbol: BTCUSDT
     - symbol: ETHUSDT
     - symbol: ETHBTC
 
-    # Large caps
-    - symbol: BNBUSDT
-    - symbol: BNBBTC
+    # # Large caps
+    # - symbol: BNBUSDT
+    # - symbol: BNBBTC
 
     # # Mid caps intéressantes
     # - symbol: ADAUSDT

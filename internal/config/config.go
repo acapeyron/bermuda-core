@@ -38,9 +38,10 @@ func Load(path string) (*Config, error) {
 
 	// Build URLs from base_url + symbol
 	for j, pair := range cfg.Exchange.Pairs {
-		symbol := strings.ToLower(pair.Symbol)
-		cfg.Exchange.Pairs[j].SnapshotURL = strings.ReplaceAll(cfg.Exchange.BaseSnapshotURL, "{symbol}", symbol)
-		cfg.Exchange.Pairs[j].WSStream = symbol + "@depth"
+		lowerCaseSymbol := strings.ToLower(pair.Symbol)
+		upperCaseSymbol := pair.Symbol
+		cfg.Exchange.Pairs[j].SnapshotURL = strings.ReplaceAll(cfg.Exchange.BaseSnapshotURL, "{symbol}", upperCaseSymbol)
+		cfg.Exchange.Pairs[j].WSStream = lowerCaseSymbol + "@depth"
 	}
 
 	return &cfg, nil
