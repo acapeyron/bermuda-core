@@ -101,32 +101,39 @@ func (m *OrderBookManager) IsStale(pair string, lastUpdateID int64) bool {
 }
 
 func (m *OrderBookManager) fetchSnapshotHTTP(pair, url string) ([]byte, error) {
-	var resp *http.Response
-	var err error
-
+	var lastErr error
 	delay := 200 * time.Millisecond
 
 	for i := 0; i < 3; i++ {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		req, _ := http.NewRequestWithContext(ctx, "GET", url, nil)
-		resp, err = http.DefaultClient.Do(req)
-		cancel()
+		body, err := func() ([]byte, error) {
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
 
-		if err == nil && resp != nil && resp.StatusCode == http.StatusOK {
-			break
+			req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+			if err != nil {
+				return nil, err
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				return nil, err
+			}
+			defer resp.Body.Close()
+
+			if resp.StatusCode != http.StatusOK {
+				return nil, fmt.Errorf("bad status: %d", resp.StatusCode)
+			}
+			return io.ReadAll(resp.Body)
+		}()
+
+		if err == nil {
+			return body, nil
 		}
+
+		lastErr = err
 		logger.Warn("[%s/%s] Snapshot attempt %d failed: %v", m.exchange, pair, i+1, err)
 		time.Sleep(delay)
 		delay *= 2
 	}
 
-	if err != nil || resp == nil {
-		return nil, fmt.Errorf("snapshot HTTP failed after retries: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("bad status: %d", resp.StatusCode)
-	}
-	return io.ReadAll(resp.Body)
+	return nil, fmt.Errorf("snapshot HTTP failed after retries: %w", lastErr)
 }
