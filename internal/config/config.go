@@ -41,7 +41,7 @@ func Load(path string) (*Config, error) {
 		lowerCaseSymbol := strings.ToLower(pair.Symbol)
 		upperCaseSymbol := pair.Symbol
 		cfg.Exchange.Pairs[j].SnapshotURL = strings.ReplaceAll(cfg.Exchange.BaseSnapshotURL, "{symbol}", upperCaseSymbol)
-		cfg.Exchange.Pairs[j].WSStream = lowerCaseSymbol + "@depth"
+		cfg.Exchange.Pairs[j].WSStream = lowerCaseSymbol + "@depth@100ms"
 	}
 
 	return &cfg, nil

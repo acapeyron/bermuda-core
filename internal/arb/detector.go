@@ -8,7 +8,7 @@ import (
 	"github.com/acapeyron/bermuda-core/internal/market"
 )
 
-const tradeSize = 50.0 // USD notional per evaluation
+const TradeSize = 50.0 // USD notional per evaluation
 
 type Leg struct {
 	Pair string
@@ -20,13 +20,17 @@ type Opportunity struct {
 	Legs             [3]Leg
 	EntryRate        float64
 	ProfitPct        float64
-	HasFullLiquidity bool // false if any leg had insufficient book depth
+	HasFullLiquidity bool
+	DurationMs       int64 // exchange-clock duration of the window, set on close
 }
 
 type cycleState struct {
-	active    bool
-	firstSeen time.Time
-	lastRate  float64
+	active          bool
+	firstSeenExchTs int64
+	lastSeenExchTs  int64
+	lastRate        float64
+	lastPct         float64
+	openOp          Opportunity // snapshot of the opportunity as it opened
 }
 
 type TriangleDetector struct {
@@ -74,12 +78,13 @@ func (d *TriangleDetector) UpdateOrderBook(ob *market.OrderBookUpdate) {
 		return
 	}
 	book.applyUpdate(ob)
+	exchTs := ob.Timestamp
 	d.mu.Unlock()
 
-	d.evaluate()
+	d.evaluate(exchTs)
 }
 
-func (d *TriangleDetector) evaluate() {
+func (d *TriangleDetector) evaluate(exchTs int64) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
@@ -89,7 +94,7 @@ func (d *TriangleDetector) evaluate() {
 		rate := 1.0
 		valid := true
 		fullLiquidity := true
-		currentSize := tradeSize // notional in quote currency, carried through legs
+		currentSize := TradeSize
 
 		for _, leg := range tri.Legs {
 			book, ok := d.books[leg.Pair]
@@ -114,13 +119,11 @@ func (d *TriangleDetector) evaluate() {
 			}
 
 			if leg.Side == "buy" {
-				// Spending currentSize quote, receiving currentSize/avgPrice base
 				rate *= (1.0 / result.AvgPrice) * keep
-				currentSize = (currentSize / result.AvgPrice) * keep // now in base units
+				currentSize = (currentSize / result.AvgPrice) * keep
 			} else {
-				// Selling currentSize base, receiving currentSize*avgPrice quote
 				rate *= result.AvgPrice * keep
-				currentSize = currentSize * result.AvgPrice * keep // now in quote units
+				currentSize = currentSize * result.AvgPrice * keep
 			}
 		}
 
@@ -129,7 +132,7 @@ func (d *TriangleDetector) evaluate() {
 		}
 		if rate > 1.0 {
 			pct := (rate - 1.0) * 100
-			d.onProfitable(tri.Name, Opportunity{
+			d.onProfitable(tri.Name, exchTs, Opportunity{
 				Triangle:         tri.Name,
 				Legs:             tri.Legs,
 				EntryRate:        rate,
@@ -137,38 +140,56 @@ func (d *TriangleDetector) evaluate() {
 				HasFullLiquidity: fullLiquidity,
 			})
 		} else {
-			d.onDead(tri.Name)
+			d.onDead(tri.Name, exchTs)
 		}
 	}
 }
 
-func (d *TriangleDetector) onProfitable(cycleKey string, op Opportunity) {
+func (d *TriangleDetector) onProfitable(cycleKey string, exchTs int64, op Opportunity) {
 	state := d.cycles[cycleKey]
 	if !state.active {
 		state.active = true
-		state.firstSeen = time.Now()
+		state.firstSeenExchTs = exchTs
+		state.lastSeenExchTs = exchTs
 		state.lastRate = op.EntryRate
+		state.lastPct = op.ProfitPct
+		state.openOp = op
 		liquidityTag := ""
 		if !op.HasFullLiquidity {
 			liquidityTag = " ⚠️ INSUFFICIENT LIQUIDITY"
 		}
 		logger.Info("[DETECTOR] [%s] Opportunity OPENED profit=+%.4f%%%s", cycleKey, op.ProfitPct, liquidityTag)
+	} else {
+		state.lastSeenExchTs = exchTs
+		state.lastRate = op.EntryRate
+		state.lastPct = op.ProfitPct
+	}
+}
+
+func (d *TriangleDetector) onDead(cycleKey string, exchTs int64) {
+	state := d.cycles[cycleKey]
+	if state.active {
+		durationMs := exchTs - state.firstSeenExchTs
+		logger.Info("[DETECTOR] [%s] Opportunity CLOSED — exchange duration: %dms (peak rate=%.8f)",
+			cycleKey, durationMs, state.lastRate)
+
+		// Emit on close with full information
+		op := state.openOp
+		op.DurationMs = durationMs
+		op.EntryRate = state.lastRate
+		op.ProfitPct = state.lastPct
+
 		select {
 		case d.OpChan <- op:
 		default:
 			logger.Warn("[DETECTOR] OpChan full, dropping opportunity (profit=+%.4f%%)", op.ProfitPct)
 		}
-	} else {
-		state.lastRate = op.EntryRate
-	}
-}
 
-func (d *TriangleDetector) onDead(cycleKey string) {
-	state := d.cycles[cycleKey]
-	if state.active {
-		duration := time.Since(state.firstSeen)
-		logger.Info("[DETECTOR] [%s] Opportunity CLOSED after %dms (peak rate=%.8f)", cycleKey, duration.Milliseconds(), state.lastRate)
 		state.active = false
 		state.lastRate = 0
+		state.lastPct = 0
+		state.firstSeenExchTs = 0
+		state.lastSeenExchTs = 0
+		state.openOp = Opportunity{}
 	}
 }

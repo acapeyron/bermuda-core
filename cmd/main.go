@@ -19,7 +19,6 @@ import (
 
 func main() {
 	figure.NewFigure("Bermuda Core", "", true).Print()
-	// Initialize logger
 	logger.Init()
 
 	err := godotenv.Load("../.env")
@@ -52,7 +51,6 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// One client for all pairs
 	client := ws.NewClient(cfg.Exchange.Name, cfg.Exchange.BaseWSURL, cfg.Exchange.Pairs, parser)
 	go client.Connect(ctx, cancel)
 
@@ -61,9 +59,8 @@ func main() {
 		symbols = append(symbols, p.Symbol)
 	}
 
-	det := arb.NewTriangleDetector(0.00011, symbols) // 0.1% taker fee
+	det := arb.NewTriangleDetector(0.00011, symbols)
 
-	// Consuming OrderBookUpdates
 	go func() {
 		for {
 			select {
@@ -71,16 +68,29 @@ func main() {
 				return
 			case ob := <-client.ObChan():
 				det.UpdateOrderBook(&ob)
-				// logger.Info("[%s] %s Bids:%d Asks:%d lastUpdateID:%d", cfg.Exchange.Name,
-				// 	ob.Pair, len(ob.Bids), len(ob.Asks), ob.LastUpdateID)
 			case op := <-det.OpChan:
-				go telegramNotifier.Send(fmt.Sprintf("🔺 Arb detected! profit=+%.4f%%\nTriangle: %v\nLegs: %v", op.ProfitPct, op.Triangle, op.Legs))
-				logger.Info("[OPPORTUNITY] profit=+%.4f%% legs=%v", op.ProfitPct, op.Legs)
+				liquidityWarn := ""
+				if !op.HasFullLiquidity {
+					liquidityWarn = "\n⚠️ Insufficient liquidity at $50 size"
+				}
+				msg := fmt.Sprintf(
+					"🔺 Arb closed!\n"+
+						"Triangle: %s\n"+
+						"Profit: +%.4f%%\n"+
+						"Duration: %dms\n"+
+						"Size: $%.0f%s",
+					op.Triangle,
+					op.ProfitPct,
+					op.DurationMs,
+					arb.TradeSize,
+					liquidityWarn,
+				)
+				go telegramNotifier.Send(msg)
+				logger.Info("[OPPORTUNITY] triangle=%s profit=+%.4f%% duration=%dms", op.Triangle, op.ProfitPct, op.DurationMs)
 			}
 		}
 	}()
 
-	// Block until CTRL+C or kill signal
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
