@@ -8,16 +8,19 @@ import (
 	"github.com/acapeyron/bermuda-core/internal/market"
 )
 
+const tradeSize = 50.0 // USD notional per evaluation
+
 type Leg struct {
 	Pair string
 	Side string // "buy" or "sell"
 }
 
 type Opportunity struct {
-	Triangle  string
-	Legs      [3]Leg
-	EntryRate float64
-	ProfitPct float64
+	Triangle         string
+	Legs             [3]Leg
+	EntryRate        float64
+	ProfitPct        float64
+	HasFullLiquidity bool // false if any leg had insufficient book depth
 }
 
 type cycleState struct {
@@ -85,6 +88,8 @@ func (d *TriangleDetector) evaluate() {
 	for _, tri := range d.triangles {
 		rate := 1.0
 		valid := true
+		fullLiquidity := true
+		currentSize := tradeSize // notional in quote currency, carried through legs
 
 		for _, leg := range tri.Legs {
 			book, ok := d.books[leg.Pair]
@@ -92,35 +97,44 @@ func (d *TriangleDetector) evaluate() {
 				valid = false
 				break
 			}
-			var price float64
+
+			var result LiquidityResult
 			if leg.Side == "buy" {
-				price = book.bestAsk()
-				if price == 0 {
-					valid = false
-					break
-				}
-				rate *= (1.0 / price) * keep
+				result = book.bestAskForSize(currentSize)
 			} else {
-				price = book.bestBid()
-				if price == 0 {
-					valid = false
-					break
-				}
-				rate *= price * keep
+				result = book.bestBidForSize(currentSize)
+			}
+
+			if result.AvgPrice == 0 {
+				valid = false
+				break
+			}
+			if !result.HasFullLiquidity {
+				fullLiquidity = false
+			}
+
+			if leg.Side == "buy" {
+				// Spending currentSize quote, receiving currentSize/avgPrice base
+				rate *= (1.0 / result.AvgPrice) * keep
+				currentSize = (currentSize / result.AvgPrice) * keep // now in base units
+			} else {
+				// Selling currentSize base, receiving currentSize*avgPrice quote
+				rate *= result.AvgPrice * keep
+				currentSize = currentSize * result.AvgPrice * keep // now in quote units
 			}
 		}
 
 		if !valid {
 			continue
 		}
-
 		if rate > 1.0 {
 			pct := (rate - 1.0) * 100
 			d.onProfitable(tri.Name, Opportunity{
-				Triangle:  tri.Name,
-				Legs:      tri.Legs,
-				EntryRate: rate,
-				ProfitPct: pct,
+				Triangle:         tri.Name,
+				Legs:             tri.Legs,
+				EntryRate:        rate,
+				ProfitPct:        pct,
+				HasFullLiquidity: fullLiquidity,
 			})
 		} else {
 			d.onDead(tri.Name)
@@ -134,14 +148,17 @@ func (d *TriangleDetector) onProfitable(cycleKey string, op Opportunity) {
 		state.active = true
 		state.firstSeen = time.Now()
 		state.lastRate = op.EntryRate
-		logger.Info("[DETECTOR] [%s] Opportunity OPENED profit=+%.4f%%", cycleKey, op.ProfitPct)
+		liquidityTag := ""
+		if !op.HasFullLiquidity {
+			liquidityTag = " ⚠️ INSUFFICIENT LIQUIDITY"
+		}
+		logger.Info("[DETECTOR] [%s] Opportunity OPENED profit=+%.4f%%%s", cycleKey, op.ProfitPct, liquidityTag)
 		select {
 		case d.OpChan <- op:
 		default:
 			logger.Warn("[DETECTOR] OpChan full, dropping opportunity (profit=+%.4f%%)", op.ProfitPct)
 		}
 	} else {
-		// Already active: update rate but don't re-emit
 		state.lastRate = op.EntryRate
 	}
 }
