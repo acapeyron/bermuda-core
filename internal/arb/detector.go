@@ -10,6 +10,10 @@ import (
 
 const TradeSize = 50.0 // USD notional per evaluation
 
+// TakerFeePerLeg is the Binance non-VIP taker fee (0.1%).
+// WS depth updates only show the resting book, so every fill is a taker fill.
+const TakerFeePerLeg = 0.001
+
 type Leg struct {
 	Pair string
 	Side string // "buy" or "sell"
@@ -18,22 +22,38 @@ type Leg struct {
 type Opportunity struct {
 	Triangle         string
 	Legs             [3]Leg
-	EntryRate        float64
-	ProfitPct        float64
-	HasFullLiquidity bool
-	DurationMs       int64 // exchange-clock duration of the window, set on close
+	OpenRate         float64   // rate at the moment the window opened
+	PeakRate         float64   // highest rate seen during the window
+	PeakProfitPct    float64   // (PeakRate - 1) * 100
+	CloseRate        float64   // last rate seen before window died (≤ 1.0)
+	CloseProfitPct   float64   // (CloseRate - 1) * 100  — may be negative
+	HasFullLiquidity bool      // false if any leg had insufficient depth at $50
+	DurationMs       int64     // exchange-clock ms from first to last profitable tick
+	OpenedAt         time.Time // wall-clock time the window opened
+	ClosedAt         time.Time // wall-clock time the window closed
 }
 
 type cycleState struct {
 	active          bool
 	firstSeenExchTs int64
 	lastSeenExchTs  int64
-	lastRate        float64
-	lastPct         float64
-	openOp          Opportunity // snapshot of the opportunity as it opened
+	openWallTime    time.Time
+
+	openRate float64
+	peakRate float64
+	peakPct  float64
+	lastRate float64
+	lastPct  float64
+
+	openOp Opportunity // snapshot captured when the window opened
+
+	// cooldown: timestamp after which this triangle may re-open
+	cooldownUntil time.Time
 }
 
 type TriangleDetector struct {
+	// fee is kept for potential future maker/taker split; evaluation now uses
+	// TakerFeePerLeg directly so the constant is always in sync.
 	fee       float64
 	mu        sync.RWMutex
 	books     map[string]*orderBook
@@ -88,7 +108,8 @@ func (d *TriangleDetector) evaluate(exchTs int64) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
-	keep := 1.0 - d.fee
+	// Apply taker fee on every leg.
+	keep := 1.0 - TakerFeePerLeg
 
 	for _, tri := range d.triangles {
 		rate := 1.0
@@ -135,61 +156,92 @@ func (d *TriangleDetector) evaluate(exchTs int64) {
 			d.onProfitable(tri.Name, exchTs, Opportunity{
 				Triangle:         tri.Name,
 				Legs:             tri.Legs,
-				EntryRate:        rate,
-				ProfitPct:        pct,
+				OpenRate:         rate,
+				PeakRate:         rate,
+				PeakProfitPct:    pct,
 				HasFullLiquidity: fullLiquidity,
 			})
 		} else {
-			d.onDead(tri.Name, exchTs)
+			d.onDead(tri.Name, exchTs, rate)
 		}
 	}
 }
 
 func (d *TriangleDetector) onProfitable(cycleKey string, exchTs int64, op Opportunity) {
 	state := d.cycles[cycleKey]
+
+	// Respect cooldown: ignore a re-open until the cooldown period has elapsed.
+	if !state.active && time.Now().Before(state.cooldownUntil) {
+		return
+	}
+
 	if !state.active {
 		state.active = true
 		state.firstSeenExchTs = exchTs
 		state.lastSeenExchTs = exchTs
-		state.lastRate = op.EntryRate
-		state.lastPct = op.ProfitPct
+		state.openWallTime = time.Now()
+		state.openRate = op.OpenRate
+		state.peakRate = op.PeakRate
+		state.peakPct = op.PeakProfitPct
+		state.lastRate = op.OpenRate
+		state.lastPct = op.PeakProfitPct
 		state.openOp = op
+
 		liquidityTag := ""
 		if !op.HasFullLiquidity {
 			liquidityTag = " ⚠️ INSUFFICIENT LIQUIDITY"
 		}
-		logger.Info("[DETECTOR] [%s] Opportunity OPENED profit=+%.4f%%%s", cycleKey, op.ProfitPct, liquidityTag)
+		logger.Info("[DETECTOR] [%s] Opportunity OPENED profit=+%.4f%%%s", cycleKey, op.PeakProfitPct, liquidityTag)
 	} else {
+		// Window still alive — update last-seen and track peak.
 		state.lastSeenExchTs = exchTs
-		state.lastRate = op.EntryRate
-		state.lastPct = op.ProfitPct
+		state.lastRate = op.OpenRate
+		state.lastPct = op.PeakProfitPct
+
+		if op.OpenRate > state.peakRate {
+			state.peakRate = op.OpenRate
+			state.peakPct = op.PeakProfitPct
+			logger.Info("[DETECTOR] [%s] New peak profit=+%.4f%%", cycleKey, state.peakPct)
+		}
 	}
 }
 
-func (d *TriangleDetector) onDead(cycleKey string, exchTs int64) {
+func (d *TriangleDetector) onDead(cycleKey string, exchTs int64, closeRate float64) {
 	state := d.cycles[cycleKey]
-	if state.active {
-		durationMs := exchTs - state.firstSeenExchTs
-		logger.Info("[DETECTOR] [%s] Opportunity CLOSED — exchange duration: %dms (peak rate=%.8f)",
-			cycleKey, durationMs, state.lastRate)
-
-		// Emit on close with full information
-		op := state.openOp
-		op.DurationMs = durationMs
-		op.EntryRate = state.lastRate
-		op.ProfitPct = state.lastPct
-
-		select {
-		case d.OpChan <- op:
-		default:
-			logger.Warn("[DETECTOR] OpChan full, dropping opportunity (profit=+%.4f%%)", op.ProfitPct)
-		}
-
-		state.active = false
-		state.lastRate = 0
-		state.lastPct = 0
-		state.firstSeenExchTs = 0
-		state.lastSeenExchTs = 0
-		state.openOp = Opportunity{}
+	if !state.active {
+		return
 	}
+
+	durationMs := exchTs - state.firstSeenExchTs
+	closePct := (closeRate - 1.0) * 100
+
+	logger.Info("[DETECTOR] [%s] Opportunity CLOSED — duration: %dms peak=+%.4f%% close=%.4f%%",
+		cycleKey, durationMs, state.peakPct, closePct)
+
+	op := state.openOp
+	op.OpenRate = state.openRate
+	op.PeakRate = state.peakRate
+	op.PeakProfitPct = state.peakPct
+	op.CloseRate = closeRate
+	op.CloseProfitPct = closePct
+	op.DurationMs = durationMs
+	op.OpenedAt = state.openWallTime
+	op.ClosedAt = time.Now()
+
+	select {
+	case d.OpChan <- op:
+	default:
+		logger.Warn("[DETECTOR] OpChan full, dropping opportunity (peak=+%.4f%%)", op.PeakProfitPct)
+	}
+
+	state.active = false
+	state.openRate = 0
+	state.peakRate = 0
+	state.peakPct = 0
+	state.lastRate = 0
+	state.lastPct = 0
+	state.firstSeenExchTs = 0
+	state.lastSeenExchTs = 0
+	state.openOp = Opportunity{}
+	state.cooldownUntil = time.Now().Add(d.cooldown)
 }
