@@ -2,6 +2,7 @@ package ws
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 	"strings"
 	"time"
@@ -19,14 +20,16 @@ const (
 )
 
 type WSClient struct {
-	wsURL    string
-	rawChan  chan []byte
-	parser   market.Parser
-	exchange string
-	manager  *OrderBookManager
+	wsURL       string
+	rawChan     chan []byte
+	parser      market.Parser
+	exchange    string
+	manager     *OrderBookManager
+	notifier    interface{ Send(string) error }
+	reconnected bool
 }
 
-func NewClient(exchange, baseWSURL string, pairs []config.PairConfig, parser market.Parser) *WSClient {
+func NewClient(exchange, baseWSURL string, pairs []config.PairConfig, parser market.Parser, notifier interface{ Send(string) error }) *WSClient {
 	streams := make([]string, len(pairs))
 	snapshotURLs := make(map[string]string)
 	for i, p := range pairs {
@@ -40,6 +43,7 @@ func NewClient(exchange, baseWSURL string, pairs []config.PairConfig, parser mar
 		parser:   parser,
 		exchange: exchange,
 		manager:  NewOrderBookManager(exchange, snapshotURLs, parser),
+		notifier: notifier,
 	}
 }
 
@@ -64,6 +68,8 @@ func (c *WSClient) Connect(ctx context.Context, cancel context.CancelFunc) {
 		}
 
 		logger.Warn("[%s] Connection lost (%v), reconnecting in %s...", c.exchange, err, delay)
+		c.notifier.Send(fmt.Sprintf("🔄 [%s] Reconnecting in %s...", c.exchange, delay))
+
 		select {
 		case <-ctx.Done():
 			return
@@ -80,17 +86,28 @@ func (c *WSClient) Connect(ctx context.Context, cancel context.CancelFunc) {
 
 // connectOnce dials, fetches snapshots, and pumps messages until the connection
 // drops or ctx is cancelled. Returns the error that ended the session.
-func (c *WSClient) connectOnce(ctx context.Context) error {
+func (c *WSClient) connectOnce(ctx context.Context) (sessionErr error) {
 	conn, _, err := websocket.DefaultDialer.Dial(c.wsURL, nil)
 	if err != nil {
 		logger.Error("[%s] WebSocket dial error: %v", c.exchange, err)
+		c.notifier.Send(fmt.Sprintf("🔴 [%s] WebSocket failed to connect: %v", c.exchange, err))
 		return err
+	}
+	if c.reconnected {
+		c.notifier.Send(fmt.Sprintf("🟢 [%s] Reconnected successfully", c.exchange))
+	} else {
+		c.reconnected = true
 	}
 	logger.Info("[%s] WebSocket connected", c.exchange)
 
 	defer func() {
 		conn.Close()
-		logger.Warn("[%s] WebSocket connection closed", c.exchange)
+		if ctx.Err() != nil {
+			// Clean shutdown — don't alert
+			return
+		}
+		logger.Warn("[%s] WebSocket session ended: %v", c.exchange, sessionErr)
+		c.notifier.Send(fmt.Sprintf("⚠️ [%s] WebSocket dropped — reconnecting... (%v)", c.exchange, sessionErr))
 	}()
 
 	// Buffer messages that arrive while snapshots are being fetched.
@@ -105,6 +122,7 @@ func (c *WSClient) connectOnce(ctx context.Context) error {
 
 	if err := c.manager.FetchAllSnapshots(); err != nil {
 		logger.Error("[%s] Failed to fetch snapshots: %v", c.exchange, err)
+		c.notifier.Send(fmt.Sprintf("🔴 [%s] Snapshot fetch failed — bot stopping: %v", c.exchange, err))
 		return err
 	}
 

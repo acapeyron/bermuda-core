@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/acapeyron/bermuda-core/internal/arb"
 	"github.com/acapeyron/bermuda-core/internal/config"
@@ -41,6 +42,8 @@ func main() {
 		os.Exit(1)
 	}
 
+	telegramNotifier.Send(fmt.Sprintf("🟢 Bermuda Core started (%d pairs, exchange: %s)", len(cfg.Exchange.Pairs), cfg.Exchange.Name))
+
 	parser, err := registry.NewParser(cfg.Exchange.Name)
 	if err != nil {
 		logger.Error("Unknown exchange: %v", err)
@@ -58,7 +61,7 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	client := ws.NewClient(cfg.Exchange.Name, cfg.Exchange.BaseWSURL, cfg.Exchange.Pairs, parser)
+	client := ws.NewClient(cfg.Exchange.Name, cfg.Exchange.BaseWSURL, cfg.Exchange.Pairs, parser, telegramNotifier)
 	go client.Connect(ctx, cancel)
 
 	symbols := make([]string, 0, len(cfg.Exchange.Pairs))
@@ -141,6 +144,8 @@ func main() {
 	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
 	<-quit
 
+	telegramNotifier.Send("🔴 Bermuda Core shutting down — manual intervention may be needed")
+	time.Sleep(500 * time.Millisecond)
 	logger.Info("Shutting down...")
 	cancel()
 }
