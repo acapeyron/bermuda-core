@@ -2,6 +2,7 @@ package arb
 
 import (
 	"sort"
+	"sync"
 
 	"github.com/acapeyron/bermuda-core/internal/market"
 )
@@ -18,6 +19,7 @@ type orderBook struct {
 	sortedBids []float64 // desc: highest first
 	sortedAsks []float64 // asc:  lowest first
 	dirty      bool
+	mu         sync.RWMutex
 }
 
 func newOrderBook() *orderBook {
@@ -28,6 +30,9 @@ func newOrderBook() *orderBook {
 }
 
 func (b *orderBook) applyUpdate(ob *market.OrderBookUpdate) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
 	for _, lvl := range ob.Bids {
 		if lvl.Size == 0 {
 			delete(b.bids, lvl.Price)
@@ -51,13 +56,13 @@ func (b *orderBook) rebuild() {
 		return
 	}
 
-	b.sortedBids = make([]float64, 0, len(b.bids))
+	b.sortedBids = b.sortedBids[:0]
 	for p := range b.bids {
 		b.sortedBids = append(b.sortedBids, p)
 	}
 	sort.Sort(sort.Reverse(sort.Float64Slice(b.sortedBids))) // desc
 
-	b.sortedAsks = make([]float64, 0, len(b.asks))
+	b.sortedAsks = b.sortedAsks[:0]
 	for p := range b.asks {
 		b.sortedAsks = append(b.sortedAsks, p)
 	}
@@ -66,26 +71,13 @@ func (b *orderBook) rebuild() {
 	b.dirty = false
 }
 
-func (b *orderBook) bestBid() float64 {
-	b.rebuild()
-	if len(b.sortedBids) == 0 {
-		return 0
-	}
-	return b.sortedBids[0]
-}
-
-func (b *orderBook) bestAsk() float64 {
-	b.rebuild()
-	if len(b.sortedAsks) == 0 {
-		return 0
-	}
-	return b.sortedAsks[0]
-}
-
 // bestAskForSize walks the ask side and returns the VWAP fill price for
 // the given notional in quote currency (e.g. 100 USDT).
 // HasFullLiquidity is false if the book ran out of size before filling.
 func (b *orderBook) bestAskForSize(quoteSize float64) LiquidityResult {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
 	b.rebuild()
 
 	remaining := quoteSize
@@ -117,6 +109,9 @@ func (b *orderBook) bestAskForSize(quoteSize float64) LiquidityResult {
 // the given notional in quote currency (e.g. 100 USDT).
 // HasFullLiquidity is false if the book ran out of size before filling.
 func (b *orderBook) bestBidForSize(quoteSize float64) LiquidityResult {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
 	b.rebuild()
 
 	remaining := quoteSize

@@ -118,16 +118,18 @@ func (d *TriangleDetector) UpdateOrderBook(ob *market.OrderBookUpdate) {
 
 func (d *TriangleDetector) evaluate(exchTs int64, localTs int64) {
 	d.mu.RLock()
-	defer d.mu.RUnlock()
+	books := d.books
+	triangles := d.triangles
+	d.mu.RUnlock()
 
-	for _, tri := range d.triangles {
+	for _, tri := range triangles {
 		rate := 1.0
 		valid := true
 		fullLiquidity := true
 		currentSize := TradeSize
 
 		for _, leg := range tri.Legs {
-			book, ok := d.books[leg.Pair]
+			book, ok := books[leg.Pair]
 			if !ok {
 				valid = false
 				break
@@ -158,26 +160,32 @@ func (d *TriangleDetector) evaluate(exchTs int64, localTs int64) {
 		}
 
 		if !valid {
+			d.onDead(tri.Name, 1.0)
 			continue
 		}
+
 		pct := (rate - 1.0) * 100
 		thresholdPct := d.fee * 100
 		if pct > thresholdPct {
-			d.onProfitable(tri.Name, exchTs, localTs, Opportunity{
+			op := Opportunity{
 				Triangle:               tri.Name,
 				Legs:                   tri.Legs,
 				OpenRate:               rate,
 				PeakRate:               rate,
 				DepthAdjustedProfitPct: pct,
 				HasFullLiquidity:       fullLiquidity,
-			})
+			}
+			d.onProfitable(tri.Name, exchTs, localTs, op)
 		} else {
-			d.onDead(tri.Name, exchTs, rate)
+			d.onDead(tri.Name, rate)
 		}
 	}
 }
 
 func (d *TriangleDetector) onProfitable(cycleKey string, exchTs int64, localTs int64, op Opportunity) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+
 	state := d.cycles[cycleKey]
 
 	// Respect cooldown: ignore a re-open until the cooldown period has elapsed.
@@ -218,9 +226,12 @@ func (d *TriangleDetector) onProfitable(cycleKey string, exchTs int64, localTs i
 	}
 }
 
-func (d *TriangleDetector) onDead(cycleKey string, exchTs int64, closeRate float64) {
+func (d *TriangleDetector) onDead(cycleKey string, closeRate float64) {
+	d.mu.Lock()
+
 	state := d.cycles[cycleKey]
 	if !state.active {
+		d.mu.Unlock()
 		return
 	}
 
@@ -235,6 +246,8 @@ func (d *TriangleDetector) onDead(cycleKey string, exchTs int64, closeRate float
 		state.lastRate = 0
 		state.lastPct = 0
 		state.openOp = Opportunity{}
+
+		d.mu.Unlock()
 		return
 	}
 
@@ -253,12 +266,6 @@ func (d *TriangleDetector) onDead(cycleKey string, exchTs int64, closeRate float
 	op.OpenedAt = state.openWallTime
 	op.ClosedAt = time.Now()
 
-	select {
-	case d.OpChan <- op:
-	default:
-		logger.Warn("[DETECTOR] OpChan full, dropping opportunity (peak=+%.4f%%)", op.DepthAdjustedProfitPct)
-	}
-
 	state.active = false
 	state.openRate = 0
 	state.peakRate = 0
@@ -269,4 +276,13 @@ func (d *TriangleDetector) onDead(cycleKey string, exchTs int64, closeRate float
 	state.lastSeenExchTs = 0
 	state.openOp = Opportunity{}
 	state.cooldownUntil = time.Now().Add(d.cooldown)
+
+	d.mu.Unlock()
+
+	select {
+	case d.OpChan <- op:
+	default:
+		logger.Warn("[DETECTOR] OpChan full, dropping opportunity (peak=+%.4f%%)", op.DepthAdjustedProfitPct)
+	}
+
 }
