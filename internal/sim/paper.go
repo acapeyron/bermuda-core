@@ -22,15 +22,15 @@ const (
 
 // PaperTrade holds the simulated P&L for a single closed opportunity.
 type PaperTrade struct {
-	// Gross profit as reported by the detector (peak, after embedded fee during
-	// detection — but we re-add it here so accounting is explicit).
-	GrossProfitPct float64
+	// DepthAdjustedProfitPct as reported by the detector (peak, after embedded depth-adjusted
+	// execution pricing).
+	DepthAdjustedProfitPct float64
 
 	// Fee charged across all three legs, as a percentage of notional.
 	TotalFeePct float64
 
-	// Estimated slippage across the full triangle, as a percentage of notional.
-	SlippagePct float64
+	// Estimated execution drift across the full triangle, as a percentage of notional.
+	ExecutionDriftPct float64
 
 	// Net profit after fees and slippage.
 	NetProfitPct float64
@@ -50,17 +50,17 @@ func Simulate(op arb.Opportunity) PaperTrade {
 	netRate := op.PeakRate * keep * keep * keep * (1.0 - SlippagePerTriangle)
 	netProfitPct := (netRate - 1.0) * 100
 
-	totalFeePct := (1.0 - keep*keep*keep) * 100 // e.g. ~0.2997%
-	slippagePct := SlippagePerTriangle * 100    // e.g. 0.02 %
+	totalFeePct := (1.0 - keep*keep*keep) * 100    // e.g. ~0.2997%
+	executionDriftPct := SlippagePerTriangle * 100 // e.g. 0.02 %
 
 	netProfitUSD := NotionalUSD * (netProfitPct / 100)
 
 	return PaperTrade{
-		GrossProfitPct: op.PeakProfitPct,
-		TotalFeePct:    totalFeePct,
-		SlippagePct:    slippagePct,
-		NetProfitPct:   netProfitPct,
-		NetProfitUSD:   netProfitUSD,
-		IsProfitable:   netProfitPct > 0,
+		DepthAdjustedProfitPct: op.DepthAdjustedProfitPct,
+		TotalFeePct:            totalFeePct,
+		ExecutionDriftPct:      executionDriftPct,
+		NetProfitPct:           netProfitPct,
+		NetProfitUSD:           netProfitUSD,
+		IsProfitable:           netProfitPct > 0,
 	}
 }

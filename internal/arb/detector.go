@@ -20,17 +20,17 @@ type Leg struct {
 }
 
 type Opportunity struct {
-	Triangle         string
-	Legs             [3]Leg
-	OpenRate         float64   // rate at the moment the window opened
-	PeakRate         float64   // highest rate seen during the window
-	PeakProfitPct    float64   // (PeakRate - 1) * 100
-	CloseRate        float64   // last rate seen before window died (≤ 1.0)
-	CloseProfitPct   float64   // (CloseRate - 1) * 100  — may be negative
-	HasFullLiquidity bool      // false if any leg had insufficient depth at $50
-	DurationMs       int64     // exchange-clock ms from first to last profitable tick
-	OpenedAt         time.Time // wall-clock time the window opened
-	ClosedAt         time.Time // wall-clock time the window closed
+	Triangle               string
+	Legs                   [3]Leg
+	OpenRate               float64   // rate at the moment the window opened
+	PeakRate               float64   // highest rate seen during the window
+	DepthAdjustedProfitPct float64   // (PeakRate - 1) * 100
+	CloseRate              float64   // last rate seen before window died (≤ 1.0)
+	CloseProfitPct         float64   // (CloseRate - 1) * 100  — may be negative
+	HasFullLiquidity       bool      // false if any leg had insufficient depth at $50
+	DurationMs             int64     // exchange-clock ms from first to last profitable tick
+	OpenedAt               time.Time // wall-clock time the window opened
+	ClosedAt               time.Time // wall-clock time the window closed
 }
 
 type cycleState struct {
@@ -160,15 +160,16 @@ func (d *TriangleDetector) evaluate(exchTs int64, localTs int64) {
 		if !valid {
 			continue
 		}
-		if rate > 1.0 {
-			pct := (rate - 1.0) * 100
+		pct := (rate - 1.0) * 100
+		thresholdPct := d.fee * 100
+		if pct > thresholdPct {
 			d.onProfitable(tri.Name, exchTs, localTs, Opportunity{
-				Triangle:         tri.Name,
-				Legs:             tri.Legs,
-				OpenRate:         rate,
-				PeakRate:         rate,
-				PeakProfitPct:    pct,
-				HasFullLiquidity: fullLiquidity,
+				Triangle:               tri.Name,
+				Legs:                   tri.Legs,
+				OpenRate:               rate,
+				PeakRate:               rate,
+				DepthAdjustedProfitPct: pct,
+				HasFullLiquidity:       fullLiquidity,
 			})
 		} else {
 			d.onDead(tri.Name, exchTs, rate)
@@ -192,9 +193,9 @@ func (d *TriangleDetector) onProfitable(cycleKey string, exchTs int64, localTs i
 		state.openWallTime = time.Now()
 		state.openRate = op.OpenRate
 		state.peakRate = op.PeakRate
-		state.peakPct = op.PeakProfitPct
+		state.peakPct = op.DepthAdjustedProfitPct
 		state.lastRate = op.OpenRate
-		state.lastPct = op.PeakProfitPct
+		state.lastPct = op.DepthAdjustedProfitPct
 		state.openOp = op
 
 		liquidityTag := ""
@@ -202,16 +203,16 @@ func (d *TriangleDetector) onProfitable(cycleKey string, exchTs int64, localTs i
 			liquidityTag = " ⚠️ INSUFFICIENT LIQUIDITY"
 		}
 		logger.Info("[DETECTOR] [%s] Opportunity OPENED profit=+%.4f%%%s lag=%dms",
-			cycleKey, op.PeakProfitPct, liquidityTag, localTs-exchTs)
+			cycleKey, op.DepthAdjustedProfitPct, liquidityTag, localTs-exchTs)
 	} else {
 		// Window still alive — update last-seen and track peak.
 		state.lastSeenExchTs = exchTs
 		state.lastRate = op.OpenRate
-		state.lastPct = op.PeakProfitPct
+		state.lastPct = op.DepthAdjustedProfitPct
 
 		if op.OpenRate > state.peakRate {
 			state.peakRate = op.OpenRate
-			state.peakPct = op.PeakProfitPct
+			state.peakPct = op.DepthAdjustedProfitPct
 			logger.Info("[DETECTOR] [%s] New peak profit=+%.4f%%", cycleKey, state.peakPct)
 		}
 	}
@@ -245,7 +246,7 @@ func (d *TriangleDetector) onDead(cycleKey string, exchTs int64, closeRate float
 	op := state.openOp
 	op.OpenRate = state.openRate
 	op.PeakRate = state.peakRate
-	op.PeakProfitPct = state.peakPct
+	op.DepthAdjustedProfitPct = state.peakPct
 	op.CloseRate = closeRate
 	op.CloseProfitPct = closePct
 	op.DurationMs = durationMs
@@ -255,7 +256,7 @@ func (d *TriangleDetector) onDead(cycleKey string, exchTs int64, closeRate float
 	select {
 	case d.OpChan <- op:
 	default:
-		logger.Warn("[DETECTOR] OpChan full, dropping opportunity (peak=+%.4f%%)", op.PeakProfitPct)
+		logger.Warn("[DETECTOR] OpChan full, dropping opportunity (peak=+%.4f%%)", op.DepthAdjustedProfitPct)
 	}
 
 	state.active = false

@@ -138,7 +138,7 @@ func insertOpportunity(tx *sql.Tx, op arb.Opportunity) (int64, error) {
 		op.Legs[0].Pair, op.Legs[0].Side,
 		op.Legs[1].Pair, op.Legs[1].Side,
 		op.Legs[2].Pair, op.Legs[2].Side,
-		op.OpenRate, op.PeakRate, op.PeakProfitPct,
+		op.OpenRate, op.PeakRate, op.DepthAdjustedProfitPct,
 		op.CloseRate, op.CloseProfitPct,
 		fullLiquidity,
 		op.DurationMs,
@@ -167,7 +167,7 @@ func insertPaperTrade(tx *sql.Tx, oppID int64, pt sim.PaperTrade) error {
 
 	_, err := tx.Exec(q,
 		oppID,
-		pt.GrossProfitPct, pt.TotalFeePct, pt.SlippagePct,
+		pt.DepthAdjustedProfitPct, pt.TotalFeePct, pt.ExecutionDriftPct,
 		pt.NetProfitPct, pt.NetProfitUSD,
 		sim.NotionalUSD, isProfitable,
 	)

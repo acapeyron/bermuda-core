@@ -74,7 +74,7 @@ func main() {
 	// set the minimum threshold slightly above that to reduce noise.
 	// The old value of 0.00011 (0.011 %) was far too low and would have
 	// produced thousands of false-positive "opportunities".
-	const detectionFeeThreshold = arb.TakerFeePerLeg // per-leg; compounded inside the detector
+	const detectionFeeThreshold = (3 * arb.TakerFeePerLeg) + sim.SlippagePerTriangle + 0.0005 // 0.05% safety margin
 	det := arb.NewTriangleDetector(detectionFeeThreshold, symbols)
 
 	go func() {
@@ -125,13 +125,13 @@ func main() {
 						"\n"+
 						"📊 Gross peak:  +%.4f%%\n"+
 						"💸 Fees (3×):   −%.4f%%\n"+
-						"📉 Slippage:    −%.4f%%\n"+
+						"📉 Execution drift:    −%.4f%%\n"+
 						"%s Net:         %+.4f%%  ($%+.4f)%s",
 					op.Triangle,
 					op.DurationMs,
-					pt.GrossProfitPct,
+					pt.DepthAdjustedProfitPct,
 					pt.TotalFeePct,
-					pt.SlippagePct,
+					pt.ExecutionDriftPct,
 					profitEmoji,
 					pt.NetProfitPct,
 					pt.NetProfitUSD,
@@ -141,7 +141,7 @@ func main() {
 
 				logger.Info(
 					"[OPPORTUNITY] triangle=%s peak=+%.4f%% net=%+.4f%% profitable=%v duration=%dms",
-					op.Triangle, op.PeakProfitPct, pt.NetProfitPct, pt.IsProfitable, op.DurationMs,
+					op.Triangle, op.DepthAdjustedProfitPct, pt.NetProfitPct, pt.IsProfitable, op.DurationMs,
 				)
 			}
 		}
