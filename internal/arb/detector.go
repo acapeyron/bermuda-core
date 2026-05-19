@@ -34,10 +34,11 @@ type Opportunity struct {
 }
 
 type cycleState struct {
-	active          bool
-	firstSeenExchTs int64
-	lastSeenExchTs  int64
-	openWallTime    time.Time
+	active           bool
+	firstSeenExchTs  int64
+	firstSeenLocalTs int64
+	lastSeenExchTs   int64
+	openWallTime     time.Time
 
 	openRate float64
 	peakRate float64
@@ -91,6 +92,8 @@ func NewTriangleDetector(fee float64, pairs []string) *TriangleDetector {
 }
 
 func (d *TriangleDetector) UpdateOrderBook(ob *market.OrderBookUpdate) {
+	localNow := time.Now().UnixMilli()
+
 	d.mu.Lock()
 	book, ok := d.books[ob.Pair]
 	if !ok {
@@ -101,15 +104,21 @@ func (d *TriangleDetector) UpdateOrderBook(ob *market.OrderBookUpdate) {
 	exchTs := ob.Timestamp
 	d.mu.Unlock()
 
-	d.evaluate(exchTs)
+	if exchTs == 0 {
+		return // snapshot ou message sans timestamp, on skip l'évaluation
+	}
+
+	lag := localNow - exchTs
+	if lag > 50 {
+		logger.Warn("[DETECTOR] High lag: %dms for %s", lag, ob.Pair)
+	}
+
+	d.evaluate(exchTs, localNow)
 }
 
-func (d *TriangleDetector) evaluate(exchTs int64) {
+func (d *TriangleDetector) evaluate(exchTs int64, localTs int64) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
-
-	// Apply taker fee on every leg.
-	keep := 1.0 - TakerFeePerLeg
 
 	for _, tri := range d.triangles {
 		rate := 1.0
@@ -140,11 +149,11 @@ func (d *TriangleDetector) evaluate(exchTs int64) {
 			}
 
 			if leg.Side == "buy" {
-				rate *= (1.0 / result.AvgPrice) * keep
-				currentSize = (currentSize / result.AvgPrice) * keep
+				rate *= (1.0 / result.AvgPrice)
+				currentSize = (currentSize / result.AvgPrice)
 			} else {
-				rate *= result.AvgPrice * keep
-				currentSize = currentSize * result.AvgPrice * keep
+				rate *= result.AvgPrice
+				currentSize = currentSize * result.AvgPrice
 			}
 		}
 
@@ -153,7 +162,7 @@ func (d *TriangleDetector) evaluate(exchTs int64) {
 		}
 		if rate > 1.0 {
 			pct := (rate - 1.0) * 100
-			d.onProfitable(tri.Name, exchTs, Opportunity{
+			d.onProfitable(tri.Name, exchTs, localTs, Opportunity{
 				Triangle:         tri.Name,
 				Legs:             tri.Legs,
 				OpenRate:         rate,
@@ -167,7 +176,7 @@ func (d *TriangleDetector) evaluate(exchTs int64) {
 	}
 }
 
-func (d *TriangleDetector) onProfitable(cycleKey string, exchTs int64, op Opportunity) {
+func (d *TriangleDetector) onProfitable(cycleKey string, exchTs int64, localTs int64, op Opportunity) {
 	state := d.cycles[cycleKey]
 
 	// Respect cooldown: ignore a re-open until the cooldown period has elapsed.
@@ -178,6 +187,7 @@ func (d *TriangleDetector) onProfitable(cycleKey string, exchTs int64, op Opport
 	if !state.active {
 		state.active = true
 		state.firstSeenExchTs = exchTs
+		state.firstSeenLocalTs = localTs
 		state.lastSeenExchTs = exchTs
 		state.openWallTime = time.Now()
 		state.openRate = op.OpenRate
@@ -191,7 +201,8 @@ func (d *TriangleDetector) onProfitable(cycleKey string, exchTs int64, op Opport
 		if !op.HasFullLiquidity {
 			liquidityTag = " ⚠️ INSUFFICIENT LIQUIDITY"
 		}
-		logger.Info("[DETECTOR] [%s] Opportunity OPENED profit=+%.4f%%%s", cycleKey, op.PeakProfitPct, liquidityTag)
+		logger.Info("[DETECTOR] [%s] Opportunity OPENED profit=+%.4f%%%s lag=%dms",
+			cycleKey, op.PeakProfitPct, liquidityTag, localTs-exchTs)
 	} else {
 		// Window still alive — update last-seen and track peak.
 		state.lastSeenExchTs = exchTs
@@ -212,7 +223,20 @@ func (d *TriangleDetector) onDead(cycleKey string, exchTs int64, closeRate float
 		return
 	}
 
-	durationMs := exchTs - state.firstSeenExchTs
+	durationMs := state.lastSeenExchTs - state.firstSeenExchTs
+
+	// Sanity check : ignore durations > 30s (probable timestamp bug)
+	if durationMs < 0 || durationMs > 30_000 {
+		logger.Warn("[DETECTOR] [%s] Suspicious duration %dms, discarding cycle", cycleKey, durationMs)
+		state.active = false
+		state.firstSeenExchTs = 0
+		state.lastSeenExchTs = 0
+		state.lastRate = 0
+		state.lastPct = 0
+		state.openOp = Opportunity{}
+		return
+	}
+
 	closePct := (closeRate - 1.0) * 100
 
 	logger.Info("[DETECTOR] [%s] Opportunity CLOSED — duration: %dms peak=+%.4f%% close=%.4f%%",

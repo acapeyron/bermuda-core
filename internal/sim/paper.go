@@ -46,9 +46,13 @@ type PaperTrade struct {
 // We use PeakProfitPct as the "best case" gross figure — it represents the
 // window where a fast executor could theoretically have entered.
 func Simulate(op arb.Opportunity) PaperTrade {
-	totalFeePct := TakerFeePerLeg * 3 * 100  // e.g. 0.3 %
-	slippagePct := SlippagePerTriangle * 100 // e.g. 0.02 %
-	netProfitPct := op.PeakProfitPct - totalFeePct - slippagePct
+	keep := 1.0 - TakerFeePerLeg
+	netRate := op.PeakRate * keep * keep * keep * (1.0 - SlippagePerTriangle)
+	netProfitPct := (netRate - 1.0) * 100
+
+	totalFeePct := (1.0 - keep*keep*keep) * 100 // e.g. ~0.2997%
+	slippagePct := SlippagePerTriangle * 100    // e.g. 0.02 %
+
 	netProfitUSD := NotionalUSD * (netProfitPct / 100)
 
 	return PaperTrade{
