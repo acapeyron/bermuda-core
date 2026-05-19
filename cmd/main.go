@@ -78,12 +78,19 @@ func main() {
 	det := arb.NewTriangleDetector(detectionFeeThreshold, symbols)
 
 	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		lastUpdate := time.Now()
 		for {
 			select {
 			case <-ctx.Done():
 				return
-
+			case <-ticker.C:
+				if time.Since(lastUpdate) > 2*time.Minute {
+					logger.Error("[HEARTBEAT] No updates for 2min, shutting down")
+					cancel() // déclenche l'arrêt propre → systemd relance
+				}
 			case ob := <-client.ObChan():
+				lastUpdate = time.Now()
 				det.UpdateOrderBook(&ob)
 
 			case op := <-det.OpChan:

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -26,7 +27,7 @@ type WSClient struct {
 	exchange    string
 	manager     *OrderBookManager
 	notifier    interface{ Send(string) error }
-	reconnected bool
+	reconnected atomic.Bool
 }
 
 func NewClient(exchange, baseWSURL string, pairs []config.PairConfig, parser market.Parser, notifier interface{ Send(string) error }) *WSClient {
@@ -60,6 +61,7 @@ func (c *WSClient) Connect(ctx context.Context, cancel context.CancelFunc) {
 			return
 		}
 
+		c.drainRawChan()
 		err := c.connectOnce(ctx)
 		if ctx.Err() != nil {
 			// Shutdown requested — exit cleanly.
@@ -93,10 +95,10 @@ func (c *WSClient) connectOnce(ctx context.Context) (sessionErr error) {
 		c.notifier.Send(fmt.Sprintf("🔴 [%s] WebSocket failed to connect: %v", c.exchange, err))
 		return err
 	}
-	if c.reconnected {
+	if c.reconnected.Load() {
 		c.notifier.Send(fmt.Sprintf("🟢 [%s] Reconnected successfully", c.exchange))
 	} else {
-		c.reconnected = true
+		c.reconnected.Store(true)
 	}
 	logger.Info("[%s] WebSocket connected", c.exchange)
 
@@ -187,6 +189,21 @@ func (c *WSClient) drainBuffer(preSnapshotChan chan []byte) {
 			c.rawChan <- msg
 		default:
 			logger.Info("[%s] Buffer fully drained", c.exchange)
+			return
+		}
+	}
+}
+
+func (c *WSClient) drainRawChan() {
+	drained := 0
+	for {
+		select {
+		case <-c.rawChan:
+			drained++
+		default:
+			if drained > 0 {
+				logger.Info("[%s] Drained %d stale messages from rawChan", c.exchange, drained)
+			}
 			return
 		}
 	}
