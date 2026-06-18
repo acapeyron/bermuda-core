@@ -9,35 +9,35 @@ exchange:
     - symbol: ETHBTC
 
     # # Large caps
-    # - symbol: BNBUSDT
-    # - symbol: BNBBTC
+    - symbol: BNBUSDT
+    - symbol: BNBBTC
 
-    # # Mid caps intéressantes
-    # - symbol: ADAUSDT
-    # - symbol: ADABTC
-    # - symbol: XRPUSDT
-    # - symbol: XRPBTC
-    # - symbol: SOLUSDT
-    # - symbol: SOLBTC
-    # - symbol: AVAXUSDT
-    # - symbol: AVAXBTC
-    # - symbol: MATICUSDT
-    # - symbol: MATICBTC
-    # - symbol: LINKUSDT
-    # - symbol: LINKBTC
-    # - symbol: UNIUSDT
-    # - symbol: UNIBTC
+    # Mid caps intéressantes
+    - symbol: ADAUSDT
+    - symbol: ADABTC
+    - symbol: XRPUSDT
+    - symbol: XRPBTC
+    - symbol: SOLUSDT
+    - symbol: SOLBTC
+    - symbol: AVAXUSDT
+    - symbol: AVAXBTC
+    - symbol: MATICUSDT
+    - symbol: MATICBTC 
+    - symbol: LINKUSDT
+    - symbol: LINKBTC
+    - symbol: UNIUSDT
+    - symbol: UNIBTC
 
-    # # Semi-illiquides (plus d’edge, plus de risque)
-    # - symbol: APEUSDT
-    # - symbol: APEBTC
-    # - symbol: SANDUSDT
-    # - symbol: SANDBTC
-    # - symbol: GRTUSDT
-    # - symbol: GRTBTC
-    # - symbol: CHZUSDT
-    # - symbol: CHZBTC
+    # Semi-illiquides (plus d’edge, plus de risque)
+    - symbol: APEUSDT
+    - symbol: APEBTC
+    - symbol: SANDUSDT
+    - symbol: SANDBTC
+    - symbol: GRTUSDT
+    - symbol: GRTBTC
+    - symbol: CHZUSDT
+    - symbol: CHZBTC
 
-    # # Stablecoins (triangles spécifiques)
-    # - symbol: USDCUSDT
-    # - symbol: FDUSDUSDT
+    # Stablecoins (triangles spécifiques)
+    - symbol: USDCUSDT
+    - symbol: FDUSDUSDT

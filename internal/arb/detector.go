@@ -108,11 +108,6 @@ func (d *TriangleDetector) UpdateOrderBook(ob *market.OrderBookUpdate) {
 		return // snapshot ou message sans timestamp, on skip l'évaluation
 	}
 
-	lag := localNow - exchTs
-	if lag > 50 {
-		logger.Warn("[DETECTOR] High lag: %dms for %s", lag, ob.Pair)
-	}
-
 	d.evaluate(exchTs, localNow)
 }
 

@@ -152,6 +152,7 @@ func (c *WSClient) readLoop(
 	readErr chan<- error,
 ) {
 	firstMessage := true
+	snapshotReady := false
 	for {
 		_, message, err := conn.ReadMessage()
 		if err != nil {
@@ -167,11 +168,16 @@ func (c *WSClient) readLoop(
 			logger.Info("[%s] WebSocket active: first message received", c.exchange)
 			firstMessage = false
 		}
-		select {
-		case <-snapshotDone:
+		if !snapshotReady {
+			select {
+			case <-snapshotDone:
+				snapshotReady = true
+				c.rawChan <- message
+			default:
+				preSnapshotChan <- message
+			}
+		} else {
 			c.rawChan <- message
-		default:
-			preSnapshotChan <- message
 		}
 	}
 }
